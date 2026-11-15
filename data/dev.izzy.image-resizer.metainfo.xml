@@ -3,18 +3,26 @@
   <id>dev.izzy.image-resizer</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
-  <name>Image Resizer</name>
-  <summary>Resize images from the GNOME Files right-click menu</summary>
+  <name>Nautilus Image Resizer</name>
+  <summary>Resize and crop images from the GNOME Files right-click menu</summary>
   <description>
     <p>
       Adds a Resize Image entry to the right-click menu in GNOME Files.
       Pick a size by percent, by dimensions, or by target file size,
-      crop if needed, and save over the original or as a copy.
+      crop with aspect presets if needed, and save over the original or
+      as a copy.
     </p>
   </description>
   <launchable type="desktop-id">dev.izzy.image-resizer.desktop</launchable>
-  <url type="homepage">https://github.com/yzraeu/gnome-shell-extension-image-resize</url>
+  <url type="homepage">https://github.com/yzraeu/nautilus-image-resizer</url>
   <developer>
     <name>Israel Rodriguez</name>
   </developer>
+  <releases>
+    <release version="1.0.0" date="2026-11-15">
+      <description>
+        <p>First release: percent, dimensions and target-size resizing with crop presets.</p>
+      </description>
+    </release>
+  </releases>
 </component>

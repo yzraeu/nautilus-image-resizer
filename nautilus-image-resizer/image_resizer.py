@@ -20,6 +20,12 @@ from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+APP_ID = "dev.izzy.image-resizer"
+APP_NAME = "Nautilus Image Resizer"
+APP_VERSION = "1.0.0"
+APP_REPO = "https://github.com/yzraeu/nautilus-image-resizer"
+APP_AUTHOR = "Israel Rodriguez"
+
 SUPPORTED = {"JPEG", "PNG", "WEBP", "BMP", "TIFF"}
 LOSSY = {"JPEG", "WEBP"}
 QUALITY_LADDER = (95, 85, 75, 65, 55, 45, 35, 25, 15)
@@ -92,8 +98,18 @@ def compute_size(w: int, h: int, mode: str, *, percent: float = 0.0,
     return (max(1, size[0]), max(1, size[1]))
 
 
-CROP_PRESETS = {"free": None, "original": None, "1:1": 1.0, "5:4": 1.25,
-                "4:3": 4 / 3, "3:2": 1.5, "16:9": 16 / 9}
+CROP_PRESETS = {
+    "free": None,
+    "original": None,
+    "1:1": 1.0,
+    "5:4": 5 / 4,
+    "4:3": 4 / 3,
+    "3:2": 3 / 2,
+    "16:10": 16 / 10,
+    "16:9": 16 / 9,
+    "21:9": 21 / 9,
+    "19:6": 19 / 6,
+}
 
 
 def crop_box(size: tuple[int, int], crop: dict) -> tuple[int, int, int, int]:
@@ -284,6 +300,9 @@ def main(argv: list[str]) -> int:
     gi.require_version("GdkPixbuf", "2.0")
     from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Gtk
 
+    GLib.set_application_name(APP_NAME)
+    GLib.set_prgname(APP_NAME.lower().replace(" ", "-"))
+
     paths = [str(p) for p in argv]
     if not paths:
         print("Usage: image_resizer.py IMAGE [IMAGE ...]", file=sys.stderr)
@@ -312,22 +331,55 @@ def main(argv: list[str]) -> int:
         except ResizeError:
             src_image = None
 
-    app = Adw.Application(application_id="dev.izzy.image-resizer",
+    app = Adw.Application(application_id=APP_ID,
                           flags=Gio.ApplicationFlags.NON_UNIQUE)
 
     def on_activate(_app):
         n = len(paths)
         win = Adw.ApplicationWindow(application=_app)
-        win.set_title(f"Resize Images ({n})" if n > 1 else "Resize Image")
+        win.set_title(APP_NAME)
         win.set_default_size(560, 860)
         win.set_size_request(460, 620)
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
-        title = Adw.WindowTitle(
-            title=f"Resize Images ({n})" if n > 1 else "Resize Image",
-            subtitle="Select the size and hit Resize")
+        subtitle = f"{n} images selected" if n > 1 else "Select the size and hit Resize"
+        title = Adw.WindowTitle(title=APP_NAME, subtitle=subtitle)
         header.set_title_widget(title)
+
+        menu = Gio.Menu()
+        menu.append(f"About {APP_NAME}", "win.about")
+        menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic",
+                                     menu_model=menu,
+                                     tooltip_text="Main Menu")
+        header.pack_end(menu_button)
+
+        def show_about(*_a):
+            about = Adw.AboutDialog(
+                application_name=APP_NAME,
+                application_icon="image-x-generic",
+                developer_name=APP_AUTHOR,
+                developers=[APP_AUTHOR],
+                version=APP_VERSION,
+                website=APP_REPO,
+                issue_url=f"{APP_REPO}/issues",
+                copyright=f"© 2026 {APP_AUTHOR}",
+                license_type=Gtk.License.GPL_3_0,
+            )
+            about.add_acknowledgement_section(
+                "Dependencies",
+                ["Pillow (MIT-CMU)",
+                 "GTK 4 (LGPL-2.1-or-later)",
+                 "libadwaita (LGPL-2.1-or-later)",
+                 "PyGObject (LGPL-2.1-or-later)",
+                 "Nautilus (GPL-3.0-or-later)",
+                 "nautilus-python (GPL-3.0-or-later)"])
+            about.present(win)
+
+        about_action = Gio.SimpleAction.new("about", None)
+        about_action.connect("activate", show_about)
+        win.add_action(about_action)
+
         toolbar.add_top_bar(header)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -433,6 +485,7 @@ def main(argv: list[str]) -> int:
                 crop_state["dims"] = (round(cw), round(ch))
             resize_fields(previous, crop_state["dims"])
             update_crop_label()
+            update_crop_controls()
             crop_area.queue_draw()
             queue_estimate()
 
@@ -486,17 +539,9 @@ def main(argv: list[str]) -> int:
         text = " · ".join(info)
         if n > 1:
             text += f" · {n} images selected"
-        info_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         summary = Gtk.Label(label=text, wrap=True,
-                            justify=Gtk.Justification.LEFT)
-        summary.set_hexpand(True)
-        info_row.append(summary)
-        crop_toggle = Gtk.ToggleButton(label="Crop")
-        crop_toggle.add_css_class("flat")
-        crop_toggle.set_valign(Gtk.Align.CENTER)
-        crop_toggle.set_sensitive(first_size is not None)
-        info_row.append(crop_toggle)
-        preview.append(info_row)
+                            justify=Gtk.Justification.CENTER)
+        preview.append(summary)
 
         crop_label = Gtk.Label(label="", wrap=True, xalign=0.0)
         crop_label.add_css_class("dim-label")
@@ -514,10 +559,10 @@ def main(argv: list[str]) -> int:
             crop_label.set_text(f"Crop {cw} × {ch} px at {x}, {y}")
 
         def set_crop_enabled(active):
-            if crop_state["on"] == active and crop_toggle.get_active() == active:
+            if crop_state["on"] == active and crop_switch.get_active() == active:
                 return
             crop_state["on"] = active
-            crop_toggle.set_active(active)
+            crop_switch.set_active(active)
             crop_area.set_can_target(active)
             if active:
                 crop_area.set_cursor(Gdk.Cursor.new_from_name("crosshair"))
@@ -531,11 +576,6 @@ def main(argv: list[str]) -> int:
                 crop_state["live"] = None
                 commit_crop(None)
             update_crop_controls()
-
-        def on_crop_toggled(button):
-            set_crop_enabled(button.get_active())
-
-        crop_toggle.connect("toggled", on_crop_toggled)
 
         # --- settings ----------------------------------------------------- #
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -678,13 +718,27 @@ def main(argv: list[str]) -> int:
         box.append(stack)
 
         # --- crop settings -------------------------------------------------- #
-        crop_group = Adw.PreferencesGroup(title="Crop")
+        crop_group = Adw.PreferencesGroup()
+        crop_expander = Adw.ExpanderRow(title="Crop", subtitle="Off")
+        crop_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        crop_switch.set_sensitive(first_size is not None)
+        crop_expander.add_suffix(crop_switch)
+        crop_group.add(crop_expander)
+
+        def crop_subtitle():
+            if not crop_state["on"]:
+                return "Off"
+            if crop_state["crop"] is None:
+                return "Drag on the preview to pick a region"
+            x, y, cw, ch = crop_box(first_size, crop_state["crop"])
+            return f"{cw} × {ch} px at {x}, {y}"
 
         def update_crop_controls():
             enabled = crop_state["on"]
             preset_row.set_sensitive(enabled)
             orient_row.set_sensitive(enabled)
             portrait.set_sensitive(enabled and crop_state["preset"] not in ("free", "1:1"))
+            crop_expander.set_subtitle(crop_subtitle())
 
         def on_preset_selected(button, name):
             if not button.get_active():
@@ -701,21 +755,69 @@ def main(argv: list[str]) -> int:
             crop_state["portrait"] = button.get_active()
             reapply_aspect()
 
-        preset_row = Adw.ActionRow(title="Ratio")
-        preset_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        preset_box.add_css_class("linked")
-        preset_box.set_valign(Gtk.Align.CENTER)
+        def ratio_icon(aspect, dashed):
+            def draw(area, cr, width, height):
+                colour = area.get_color()
+                cr.set_source_rgba(colour.red, colour.green, colour.blue, colour.alpha)
+                pad = 2.0
+                avail_w = max(1.0, width - 2 * pad)
+                avail_h = max(1.0, height - 2 * pad)
+                if aspect is None:
+                    w, h = avail_w, avail_h
+                else:
+                    w = min(avail_w, avail_h * aspect)
+                    h = w / aspect
+                x, y = (width - w) / 2, (height - h) / 2
+                cr.set_line_width(1.5)
+                if dashed:
+                    cr.set_dash([2.0, 2.0])
+                cr.rectangle(x, y, w, h)
+                cr.stroke()
+            return draw
+
+        preset_row = Adw.PreferencesRow()
+        preset_row.set_sensitive(False)
+        preset_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        preset_body.set_margin_top(6)
+        preset_body.set_margin_bottom(6)
+        preset_caption = Gtk.Label(label="Ratio", xalign=0.0)
+        preset_caption.add_css_class("dim-label")
+        preset_caption.add_css_class("caption")
+        preset_body.append(preset_caption)
+        preset_flow = Gtk.FlowBox()
+        preset_flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        preset_flow.set_homogeneous(True)
+        preset_flow.set_min_children_per_line(5)
+        preset_flow.set_max_children_per_line(10)
+        preset_flow.set_column_spacing(4)
+        preset_flow.set_row_spacing(4)
+        preset_body.append(preset_flow)
+        preset_row.set_child(preset_body)
         preset_buttons = {}
-        for label, name in (("Free", "free"), ("Original", "original"),
-                            ("1:1", "1:1"), ("5:4", "5:4"), ("4:3", "4:3"),
-                            ("3:2", "3:2"), ("16:9", "16:9")):
-            button = Gtk.ToggleButton(label=label)
+        original_aspect = ((first_size[0] / first_size[1]) if first_size else 4 / 3)
+        for name, aspect in CROP_PRESETS.items():
+            label = {"free": "Free", "original": "Original"}.get(name, name)
+            if name == "original":
+                aspect = original_aspect
+            dashed = name == "free"
+            button = Gtk.ToggleButton()
+            button.set_tooltip_text(label)
+            button.update_property([Gtk.AccessibleProperty.LABEL], [label])
             button.set_active(name == "free")
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            glyph = Gtk.DrawingArea()
+            glyph.set_size_request(26, 18)
+            glyph.set_halign(Gtk.Align.CENTER)
+            glyph.set_draw_func(ratio_icon(aspect, dashed))
+            text = Gtk.Label(label=label)
+            text.add_css_class("caption")
+            content.append(glyph)
+            content.append(text)
+            button.set_child(content)
             button.connect("toggled", on_preset_selected, name)
-            preset_box.append(button)
+            preset_flow.append(button)
             preset_buttons[name] = button
-        preset_row.add_suffix(preset_box)
-        crop_group.add(preset_row)
+        crop_expander.add_row(preset_row)
 
         orient_row = Adw.ActionRow(title="Orientation")
         portrait = Gtk.ToggleButton(label="Portrait")
@@ -723,8 +825,11 @@ def main(argv: list[str]) -> int:
         portrait.set_tooltip_text("Swap the crop ratio to portrait")
         portrait.connect("toggled", on_portrait_toggled)
         orient_row.add_suffix(portrait)
-        crop_group.add(orient_row)
+        crop_expander.add_row(orient_row)
         box.append(crop_group)
+
+        crop_switch.connect("notify::active",
+                            lambda row, _p: set_crop_enabled(row.get_active()))
 
         update_crop_controls()
 

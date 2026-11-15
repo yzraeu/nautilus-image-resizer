@@ -1,6 +1,6 @@
-# Image Resizer for GNOME Files
+# Nautilus Image Resizer
 
-Right-click an image in GNOME Files (Nautilus), choose **Resize Image**, and pick a size. That is the whole app.
+Right-click an image in GNOME Files (Nautilus), choose **Resize Image**, and pick a size or crop. That is the whole app.
 
 This is a Nautilus plugin plus a small GTK4 / libadwaita app. It is not a GNOME Shell extension, and it is not distributed through extensions.gnome.org.
 
@@ -9,7 +9,7 @@ This is a Nautilus plugin plus a small GTK4 / libadwaita app. It is not a GNOME 
 - Adds a `Resize Image…` entry to the right-click menu for image files in Files.
 - Opens a dialog with a preview, live output estimate, and crop controls.
 - Resize modes: percent, exact dimensions (with aspect lock), and target file size.
-- Crop presets: free, original, 1:1, 5:4, 4:3, 3:2, 16:9.
+- Crop presets: free, original, 1:1, 5:4, 4:3, 3:2, 16:10, 16:9, 21:9, 19:6, each with a portrait toggle.
 - Output: overwrite the original, or save a copy with a suffix (default `_resized`).
 - Formats: JPEG, PNG, WEBP, BMP, TIFF. Animated and multi-frame images are refused.
 - Engine: Pillow, with EXIF orientation handling so the output is never rotated twice.
