@@ -8,7 +8,10 @@ This is a Nautilus plugin plus a small GTK4 / libadwaita app. It is not a GNOME 
 
 - Adds a `Resize Image…` entry to the right-click menu for image files in Files.
 - Opens a window with a preview that grows with it and a live output estimate
-  (pixels, percent, and KB / MB) for whichever mode is on screen.
+  (pixels, percent, and KB / MB) for whichever mode is on screen; with several
+  files selected it estimates all of them and shows the total.
+- Select several images and the menu reads **Resize N Images…**; the preview
+  stacks them, first image on top and the rest peeking out behind.
 - Resize modes: percent, exact dimensions (with a crop-aware aspect lock), and
   target file size, which drops quality and then resolution until the file fits.
 - Crop: a collapsed **Crop** section you arm with its switch, then drag on the

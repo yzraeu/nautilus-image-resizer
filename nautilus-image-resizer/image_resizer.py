@@ -298,7 +298,10 @@ def main(argv: list[str]) -> int:
     gi.require_version("Gtk", "4.0")
     gi.require_version("Adw", "1")
     gi.require_version("GdkPixbuf", "2.0")
-    from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Gtk
+    gi.require_version("Gsk", "4.0")
+    gi.require_version("Graphene", "1.0")
+    from gi.repository import (Adw, Gdk, GdkPixbuf, Gio, GLib, Graphene, Gsk,
+                               Gtk)
 
     GLib.set_application_name(APP_NAME)
     GLib.set_prgname(APP_NAME.lower().replace(" ", "-"))
@@ -394,17 +397,95 @@ def main(argv: list[str]) -> int:
         preview.set_margin_start(12)
         preview.set_margin_end(12)
 
-        pic = Gtk.Picture()
-        pic.set_content_fit(Gtk.ContentFit.CONTAIN)
-        pic.set_size_request(-1, 120)
-        try:
-            # Decode once at preview size; the picture scales it with the window.
-            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(first_path, 900, 900, True)
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                pic.set_paintable(Gdk.Texture.new_for_pixbuf(pixbuf))
-        except Exception:
-            pass
+        def texture_at(path, size):
+            # Decode once at preview size; the widget scales it with the window.
+            try:
+                pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    return Gdk.Texture.new_for_pixbuf(pixbuf)
+            except Exception:
+                return None
+
+        class PreviewDeck(Gtk.Widget):
+            """The first image on top; the rest peek out as cards behind it."""
+
+            PAD = 10  # px each back card is offset from the one in front of it
+
+            def __init__(self, front, backs, source_size):
+                super().__init__()
+                self._front = front
+                self._backs = backs        # nearest card first
+                self._source_size = source_size
+
+            def do_measure(self, orientation, _for_size):
+                if orientation == Gtk.Orientation.VERTICAL:
+                    return 120, 280, -1, -1
+                return 0, 0, -1, -1
+
+            def top_card(self):
+                """Rect of the front card, deck and peeking cards included."""
+                width, height = self.get_width(), self.get_height()
+                inset = self.PAD * len(self._backs)
+                avail_w, avail_h = max(1, width - inset), max(1, height - inset)
+                if self._source_size:
+                    source_w, source_h = self._source_size
+                    scale = min(avail_w / source_w, avail_h / source_h)
+                    card_w, card_h = source_w * scale, source_h * scale
+                else:
+                    card_w, card_h = avail_w, avail_h
+                # The stack takes card + inset; center that block in the widget.
+                return ((width - card_w - inset) / 2,
+                        (height - card_h - inset) / 2,
+                        card_w, card_h)
+
+            def image_geometry(self):
+                """Scale and offset mapping the source image onto the widget."""
+                if self._source_size is None:
+                    return None
+                x, y, width, height = self.top_card()
+                scale = width / self._source_size[0]
+                return (scale, x, y)
+
+            def _card(self, snapshot, texture, rect, radius, alpha, cover):
+                if texture is None:
+                    return
+                x, y, width, height = rect
+                area = Graphene.Rect().init(x, y, width, height)
+                rounded = Gsk.RoundedRect()
+                rounded.init_from_rect(area, radius)
+                snapshot.push_rounded_clip(rounded)
+                snapshot.push_opacity(alpha)
+                if cover:
+                    # Crop to fill the card instead of squashing the photo.
+                    texture_w, texture_h = texture.get_width(), texture.get_height()
+                    scale = max(width / texture_w, height / texture_h)
+                    draw_w, draw_h = texture_w * scale, texture_h * scale
+                    snapshot.append_texture(
+                        texture,
+                        Graphene.Rect().init(x + (width - draw_w) / 2,
+                                             y + (height - draw_h) / 2,
+                                             draw_w, draw_h))
+                else:
+                    snapshot.append_texture(texture, area)
+                snapshot.pop()
+                snapshot.pop()
+
+            def do_snapshot(self, snapshot):
+                x, y, width, height = self.top_card()
+                radius = 8.0
+                for depth in range(len(self._backs), 0, -1):
+                    offset = self.PAD * depth
+                    alpha = 0.65 + 0.2 * (len(self._backs) - depth)
+                    self._card(snapshot, self._backs[depth - 1],
+                               (x + offset, y + offset, width, height),
+                               radius, alpha, True)
+                self._card(snapshot, self._front, (x, y, width, height),
+                           radius, 1.0, False)
+
+        front_texture = texture_at(first_path, 900)
+        back_textures = [t for t in (texture_at(p, 400) for p in paths[1:5]) if t]
+        pic = PreviewDeck(front_texture, back_textures, first_size)
 
         overlay = Gtk.Overlay()
         overlay.set_child(pic)
@@ -420,13 +501,7 @@ def main(argv: list[str]) -> int:
         def display_geometry():
             if not first_size:
                 return None
-            width, height = pic.get_width(), pic.get_height()
-            if width <= 0 or height <= 0:
-                return None
-            scale = min(width / first_size[0], height / first_size[1])
-            return (scale,
-                    (width - first_size[0] * scale) / 2,
-                    (height - first_size[1] * scale) / 2)
+            return pic.image_geometry()
 
         def to_source(x, y):
             geometry = display_geometry()
@@ -532,16 +607,31 @@ def main(argv: list[str]) -> int:
         drag.connect("drag-end", on_crop_end)
         crop_area.add_controller(drag)
 
-        info = [Path(first_path).name]
-        info.append(f"{first_size[0]}×{first_size[1]}" if first_size else "unreadable")
-        if first_bytes:
-            info.append(_human_size(first_bytes))
-        text = " · ".join(info)
+        total_bytes = 0
+        for p in paths:
+            try:
+                total_bytes += Path(p).stat().st_size
+            except OSError:
+                continue
+
         if n > 1:
-            text += f" · {n} images selected"
-        summary = Gtk.Label(label=text, wrap=True,
-                            justify=Gtk.Justification.CENTER)
-        preview.append(summary)
+            details = [_human_size(total_bytes), f"{n} images selected"]
+        else:
+            details = []
+            details.append(f"{first_size[0]}×{first_size[1]}" if first_size
+                           else "unreadable")
+            if first_bytes:
+                details.append(_human_size(first_bytes))
+
+        caption = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        name = Gtk.Label(label=Path(first_path).name, wrap=True,
+                         justify=Gtk.Justification.CENTER)
+        detail = Gtk.Label(label=" · ".join(details), wrap=True,
+                           justify=Gtk.Justification.CENTER)
+        detail.add_css_class("dim-label")
+        caption.append(name)
+        caption.append(detail)
+        preview.append(caption)
 
         crop_label = Gtk.Label(label="", wrap=True, xalign=0.0)
         crop_label.add_css_class("dim-label")
@@ -788,7 +878,7 @@ def main(argv: list[str]) -> int:
         preset_flow.set_selection_mode(Gtk.SelectionMode.NONE)
         preset_flow.set_homogeneous(True)
         preset_flow.set_min_children_per_line(5)
-        preset_flow.set_max_children_per_line(10)
+        preset_flow.set_max_children_per_line(5)
         preset_flow.set_column_spacing(4)
         preset_flow.set_row_spacing(4)
         preset_body.append(preset_flow)
@@ -912,7 +1002,10 @@ def main(argv: list[str]) -> int:
             return f"{size[0]} × {size[1]} px"
 
         def bytes_line(nbytes):
-            return f"≈ {nbytes / 1024:,.0f} KB ({nbytes / 1048576:.2f} MB)"
+            line = f"≈ {nbytes / 1024:,.0f} KB"
+            if nbytes >= 1048576:
+                line += f" ({nbytes / 1048576:.2f} MB)"
+            return line
 
         def pct_line(size):
             if not first_size:
@@ -944,33 +1037,56 @@ def main(argv: list[str]) -> int:
             for name, row in outputs.items():
                 row.set_subtitle(text if name == active else "—")
 
-        def apply_estimate(token, mode, result, error):
+        def apply_estimate(token, mode, results, skipped, error):
             if token != state["token"]:
                 return False
             row = outputs[mode]
-            if error or result is None:
+            if not results:
                 row.set_subtitle(f"estimate failed: {error}")
                 return False
-            size = result["size"]
-            if mode == "percent":
-                parts = [px_line(size), bytes_line(result["bytes"])]
-            elif mode == "dimensions":
-                parts = [pct_line(size), bytes_line(result["bytes"])]
+            if len(results) == 1:
+                result = results[0]
+                size = result["size"]
+                if mode == "percent":
+                    parts = [px_line(size), bytes_line(result["bytes"])]
+                elif mode == "dimensions":
+                    parts = [pct_line(size), bytes_line(result["bytes"])]
+                else:
+                    parts = [px_line(size), pct_line(size)]
+                if result.get("note"):
+                    parts.append(result["note"])
             else:
-                parts = [px_line(size), pct_line(size)]
-            if result.get("note"):
-                parts.append(result["note"])
+                # One subtitle has to describe every selected file.
+                total_bytes = sum(result["bytes"] for result in results)
+                sizes = {tuple(result["size"]) for result in results}
+                if mode == "percent":
+                    parts = [f"{pct_adj.get_value():.0f} %"]
+                elif len(sizes) == 1:
+                    parts = [px_line(results[0]["size"])]
+                elif mode == "dimensions":
+                    parts = ["sizes vary"]
+                else:
+                    parts = []
+                parts.append(f"total {bytes_line(total_bytes)}")
+                parts.append(f"{len(results)} images")
+            if skipped:
+                parts.append(f"{skipped} skipped")
             row.set_subtitle(" · ".join(part for part in parts if part))
             return False
 
         def run_estimate(token, mode, params):
-            try:
-                result = estimate(src_image[0], src_image[1], src_image[2],
-                                  src_image[3], mode, params)
-                error = None
-            except Exception as exc:
-                result, error = None, f"{type(exc).__name__}: {exc}"
-            GLib.idle_add(apply_estimate, token, mode, result, error)
+            results = []
+            skipped = 0
+            error = None
+            for path in paths:
+                try:
+                    image = load_image(path)
+                    results.append(estimate(image[0], image[1], image[2],
+                                            image[3], mode, params))
+                except Exception as exc:
+                    skipped += 1
+                    error = f"{type(exc).__name__}: {exc}"
+            GLib.idle_add(apply_estimate, token, mode, results, skipped, error)
 
         def queue_estimate(*_a):
             state["token"] += 1

@@ -17,6 +17,12 @@ GUI_CANDIDATES = (
 )
 
 
+def _menu_label(count):
+    if count == 1:
+        return "Resize Image…"
+    return f"Resize {count} Images…"
+
+
 def _find_gui():
     for candidate in GUI_CANDIDATES:
         if Path(candidate).is_file():
@@ -36,7 +42,7 @@ class ImageResizerExtension(GObject.GObject, Nautilus.MenuProvider):
         if not paths:
             return []
         item = Nautilus.MenuItem(name="ImageResizerExtension::resize",
-                                 label="Resize Image…")
+                                 label=_menu_label(len(paths)))
         item.connect("activate", self._on_activate, paths)
         return [item]
 
