@@ -1000,39 +1000,9 @@ def main(argv: list[str]) -> int:
             adj.connect("value-changed", queue_estimate)
         chain.connect("toggled", queue_estimate)
 
-        def finish(results):
-            ok_count = sum(1 for r in results if r.ok)
-            lines = []
-            for r in results:
-                if not r.ok or r.note:
-                    lines.append(f"{Path(r.src).name}: {r.note}")
-            shown = lines[:5]
-            body = f"Resized {ok_count} of {len(results)} images."
-            if shown:
-                body += "\n\n" + "\n".join(shown)
-                if len(lines) > len(shown):
-                    body += f"\n… and {len(lines) - len(shown)} more"
-            dialog = Adw.AlertDialog(heading="Resize complete", body=body)
-            dialog.add_response("close", "Close")
-            dialog.set_default_response("close")
-            dialog.set_close_response("close")
-            closed = {"done": False}
-
-            def on_done(_dialog, _response):
-                # A presented Adw.Dialog keeps its window from closing, so the
-                # dialog goes first; the guard absorbs a repeated response.
-                if closed["done"]:
-                    return
-                closed["done"] = True
-                dialog.close()
-                win.close()
-
-            dialog.connect("response", on_done)
-            dialog.present(win)
-            resize.set_sensitive(True)
-            cancel.set_sensitive(True)
-            reset.set_sensitive(True)
-            resize.set_label("Resize")
+        def finish(_results):
+            # No summary dialog: the window just goes away when the work is done.
+            win.close()
 
         def worker(jobs):
             results = [process_file(src, dst, mode, params)
