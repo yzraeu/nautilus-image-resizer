@@ -44,7 +44,15 @@ sudo apt install python3-nautilus python3-pil python3-gi gir1.2-gtk-4.0 gir1.2-a
 
 ## Install
 
-From a checkout of this repo:
+### Fedora, with dnf (COPR)
+
+```sh
+sudo dnf copr enable yzraeu/nautilus-image-resizer
+sudo dnf install nautilus-image-resizer
+nautilus -q
+```
+
+### From a checkout
 
 ```sh
 make install
@@ -94,9 +102,31 @@ data/dev.izzy.image-resizer.desktop.in    # desktop file template
 data/dev.izzy.image-resizer.metainfo.xml  # AppStream metadata
 tests/test_engine.py                      # headless engine tests, no GUI needed
 Makefile                                  # install / uninstall / test
+nautilus-image-resizer.spec               # Fedora RPM packaging
 ```
 
-The plugin launches the app with the selected paths. It looks for the app at `~/.local/share/nautilus-image-resizer/image_resizer.py`, which is where `make install` puts it. A system-wide package will need to point it at the packaged path instead.
+The plugin launches the app with the selected paths. It looks for the app in
+`/usr/share/nautilus-image-resizer/`, then `/usr/local/share/nautilus-image-resizer/`,
+then `~/.local/share/nautilus-image-resizer/`, first match wins. So a system
+package and a user install both work.
+
+## Fedora packaging
+
+`nautilus-image-resizer.spec` builds the RPM. It needs a `v1.0.0` tag on
+GitHub, because `Source0` is the release tarball for that tag.
+
+Build it locally, in a Fedora container (no sudo needed on the host):
+
+```sh
+podman run --rm -v "$PWD:/work:z" fedora:45 bash -c '
+  dnf -y install rpm-build rpmdevtools make desktop-file-utils libappstream-glib python3-pillow
+  spectool -g -R /work/nautilus-image-resizer.spec
+  rpmbuild -ba /work/nautilus-image-resizer.spec'
+```
+
+Or submit the built source RPM to COPR, which builds it on Fedora infra and
+hosts a repo that dnf can use. See the COPR docs for `copr-cli create` and
+`copr-cli build`.
 
 ## Development
 

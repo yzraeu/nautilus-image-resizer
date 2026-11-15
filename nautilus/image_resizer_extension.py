@@ -8,7 +8,20 @@ import gi
 gi.require_version("Nautilus", "4.1")
 from gi.repository import GObject, Nautilus  # noqa: E402
 
-GUI = str(Path.home() / ".local/share/nautilus-image-resizer/image_resizer.py")
+# Where the GUI app lives. System install first, then a user install.
+# A system package puts it in /usr/share, `make install` puts it in ~/.local.
+GUI_CANDIDATES = (
+    "/usr/share/nautilus-image-resizer/image_resizer.py",
+    "/usr/local/share/nautilus-image-resizer/image_resizer.py",
+    str(Path.home() / ".local/share/nautilus-image-resizer/image_resizer.py"),
+)
+
+
+def _find_gui():
+    for candidate in GUI_CANDIDATES:
+        if Path(candidate).is_file():
+            return candidate
+    return GUI_CANDIDATES[-1]
 
 
 class ImageResizerExtension(GObject.GObject, Nautilus.MenuProvider):
@@ -28,4 +41,5 @@ class ImageResizerExtension(GObject.GObject, Nautilus.MenuProvider):
         return [item]
 
     def _on_activate(self, _item, paths):
-        subprocess.Popen(["/usr/bin/python3", GUI, *paths], start_new_session=True)
+        subprocess.Popen(["/usr/bin/python3", _find_gui(), *paths],
+                         start_new_session=True)

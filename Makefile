@@ -24,10 +24,11 @@ install: test
 	install -Dm755 $(APP_SRC) $(APP_DST)
 	install -Dm644 $(PLUGIN_SRC) $(PLUGIN_DST)
 	install -Dm644 $(METAINFO_SRC) $(METAINFO_DST)
+	mkdir -p $(dir $(DESKTOP_DST))
 	sed 's|@APP_PATH@|$(PREFIX)/share/nautilus-image-resizer/image_resizer.py|' \
 		$(DESKTOP_IN) > $(DESKTOP_DST)
 	chmod 644 $(DESKTOP_DST)
-	@if command -v update-desktop-database >/dev/null 2>&1; then \
+	@if [ -z "$(DESTDIR)" ] && command -v update-desktop-database >/dev/null 2>&1; then \
 		update-desktop-database $(DESTDIR)$(PREFIX)/share/applications || true; \
 	fi
 	@if command -v appstreamcli >/dev/null 2>&1; then \
