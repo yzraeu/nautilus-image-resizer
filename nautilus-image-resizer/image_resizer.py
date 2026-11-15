@@ -24,7 +24,7 @@ APP_ID = "dev.izzy.image-resizer"
 APP_NAME = "Nautilus Image Resizer"
 APP_VERSION = "1.0.0"
 APP_REPO = "https://github.com/yzraeu/nautilus-image-resizer"
-APP_AUTHOR = "Israel Rodriguez"
+APP_AUTHOR = "yzraeu"
 
 SUPPORTED = {"JPEG", "PNG", "WEBP", "BMP", "TIFF"}
 LOSSY = {"JPEG", "WEBP"}

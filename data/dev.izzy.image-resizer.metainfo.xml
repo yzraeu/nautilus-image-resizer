@@ -16,7 +16,7 @@
   <launchable type="desktop-id">dev.izzy.image-resizer.desktop</launchable>
   <url type="homepage">https://github.com/yzraeu/nautilus-image-resizer</url>
   <developer>
-    <name>Israel Rodriguez</name>
+    <name>yzraeu</name>
   </developer>
   <releases>
     <release version="1.0.0" date="2026-11-15">

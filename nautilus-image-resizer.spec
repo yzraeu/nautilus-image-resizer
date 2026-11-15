@@ -50,5 +50,5 @@ make test
 %{_datadir}/metainfo/dev.izzy.image-resizer.metainfo.xml
 
 %changelog
-* Sun Nov 15 2026 Israel Rodriguez <yzraeu@gmail.com> - 1.0.0-1
+* Sun Nov 15 2026 yzraeu <yzraeu@gmail.com> - 1.0.0-1
 - Initial package
