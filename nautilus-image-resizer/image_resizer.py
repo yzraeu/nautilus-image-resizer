@@ -341,6 +341,14 @@ def main(argv: list[str]) -> int:
         n = len(paths)
         win = Adw.ApplicationWindow(application=_app)
         win.set_title(APP_NAME)
+        # The Percentage and File Size page icons ship with the app; register
+        # their private theme root so the icon theme can find them.
+        for icons in (Path(__file__).resolve().parent / "icons",
+                      Path(__file__).resolve().parent.parent / "data" / "icons"):
+            if (icons / "hicolor").is_dir():
+                Gtk.IconTheme.get_for_display(win.get_display()).add_search_path(
+                    str(icons))
+                break
         win.set_default_size(560, 860)
         win.set_size_request(460, 620)
 
@@ -700,7 +708,7 @@ def main(argv: list[str]) -> int:
         grp_pct.add(pct_out)
         page_pct.append(grp_pct)
         stack.add_titled(page_pct, "percent", "Percentage")
-        stack.get_page(page_pct).set_icon_name("zoom-in-symbolic")
+        stack.get_page(page_pct).set_icon_name("percent-symbolic")
 
         # Dimensions
         page_dim = new_page()
@@ -802,7 +810,7 @@ def main(argv: list[str]) -> int:
         grp_size.add(size_out)
         page_size.append(grp_size)
         stack.add_titled(page_size, "filesize", "File Size")
-        stack.get_page(page_size).set_icon_name("drive-harddisk-symbolic")
+        stack.get_page(page_size).set_icon_name("file-size-symbolic")
 
         stack.set_visible_child_name("dimensions")
         box.append(stack)
@@ -997,6 +1005,13 @@ def main(argv: list[str]) -> int:
 
         # --- live output estimate ------------------------------------------ #
         outputs = {"percent": pct_out, "dimensions": dim_out, "filesize": size_out}
+        spinners = {}
+        for name, row in outputs.items():
+            spinner = Adw.Spinner()
+            spinner.set_valign(Gtk.Align.CENTER)
+            spinner.set_visible(False)
+            row.add_suffix(spinner)
+            spinners[name] = spinner
 
         def px_line(size):
             return f"{size[0]} × {size[1]} px"
@@ -1032,15 +1047,20 @@ def main(argv: list[str]) -> int:
 
         state = {"token": 0, "pending": 0}
 
-        def show_status(text):
+        def show_status(text, busy=False):
             active = stack.get_visible_child_name()
             for name, row in outputs.items():
                 row.set_subtitle(text if name == active else "—")
+                spinners[name].set_visible(busy and name == active)
+
+        def stop_spinner(mode):
+            spinners[mode].set_visible(False)
 
         def apply_estimate(token, mode, results, skipped, error):
             if token != state["token"]:
                 return False
             row = outputs[mode]
+            stop_spinner(mode)
             if not results:
                 row.set_subtitle(f"estimate failed: {error}")
                 return False
@@ -1104,7 +1124,7 @@ def main(argv: list[str]) -> int:
                 state["pending"] = 0
                 mode = stack.get_visible_child_name()
                 params = params_for(mode)
-                show_status("Calculating…")
+                show_status("Calculating…", busy=True)
                 threading.Thread(target=run_estimate,
                                  args=(token, mode, params), daemon=True).start()
                 return False

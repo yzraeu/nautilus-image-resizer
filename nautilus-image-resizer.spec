@@ -48,6 +48,9 @@ make test
 %{_datadir}/nautilus-python/extensions/image_resizer_extension.py
 %{_datadir}/applications/dev.izzy.image-resizer.desktop
 %{_datadir}/metainfo/dev.izzy.image-resizer.metainfo.xml
+%{_datadir}/nautilus-image-resizer/icons/hicolor/index.theme
+%{_datadir}/nautilus-image-resizer/icons/hicolor/scalable/actions/percent-symbolic.svg
+%{_datadir}/nautilus-image-resizer/icons/hicolor/scalable/actions/file-size-symbolic.svg
 
 %changelog
 * Sun Nov 15 2026 yzraeu <yzraeu@gmail.com> - 1.0.0-1
