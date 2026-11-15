@@ -7,10 +7,19 @@ This is a Nautilus plugin plus a small GTK4 / libadwaita app. It is not a GNOME 
 ## What it does
 
 - Adds a `Resize Image…` entry to the right-click menu for image files in Files.
-- Opens a dialog with a preview, live output estimate, and crop controls.
-- Resize modes: percent, exact dimensions (with aspect lock), and target file size.
-- Crop presets: free, original, 1:1, 5:4, 4:3, 3:2, 16:10, 16:9, 21:9, 19:6, each with a portrait toggle.
+- Opens a window with a preview that grows with it and a live output estimate
+  (pixels, percent, and KB / MB) for whichever mode is on screen.
+- Resize modes: percent, exact dimensions (with a crop-aware aspect lock), and
+  target file size, which drops quality and then resolution until the file fits.
+- Crop: a collapsed **Crop** section you arm with its switch, then drag on the
+  preview. Presets are Free (dashed), Original, 1:1, 5:4, 4:3, 3:2, 16:10,
+  16:9, 21:9 and 19:6 — each drawn as its own rectangle and flippable with
+  **Portrait**. The dimension fields follow the crop rectangle.
+- **Reset** puts every control back to its default.
 - Output: overwrite the original, or save a copy with a suffix (default `_resized`).
+- The window closes when the resize is done; the results are in Files.
+- Header menu → **About** shows the version, repository, credits and the
+  licenses of the libraries it builds on.
 - Formats: JPEG, PNG, WEBP, BMP, TIFF. Animated and multi-frame images are refused.
 - Engine: Pillow, with EXIF orientation handling so the output is never rotated twice.
 
@@ -60,14 +69,21 @@ nautilus -q
 
 1. In Files, right-click one or more images.
 2. Choose **Resize Image…**
-3. Pick Percent, Dimensions, or File Size, adjust crop if you want it, and choose overwrite or a suffix.
-4. Hit **Resize**.
+3. Pick Percent, Dimensions, or File Size. The **Output** line under the
+   current mode updates as you change it.
+4. To cut the image first, expand **Crop**, flip its switch on, pick a ratio
+   (or leave it on Free) and drag on the preview. **Portrait** swaps the ratio;
+   the dimension fields and the **Output** estimate follow.
+5. Choose overwrite or a suffix, then hit **Resize**. The window closes and the
+   results are in Files.
 
 The app can also be run directly, for testing:
 
 ```sh
 python3 ~/.local/share/nautilus-image-resizer/image_resizer.py photo.jpg
 ```
+
+Current version: 1.0.0 — the same number the **About** dialog reports.
 
 ## Layout
 
@@ -88,7 +104,10 @@ The plugin launches the app with the selected paths. It looks for the app at `~/
 make test
 ```
 
-That byte-compiles both Python files and runs the engine tests in `tests/`. The GUI is only imported when the app runs, so the engine tests run headless with Pillow only.
+That byte-compiles both Python files and runs the engine tests in `tests/`,
+covering sizing, crop geometry and aspect presets, EXIF handling and the
+estimate/write parity. The GUI is only imported when the app runs, so the tests
+run headless with Pillow only.
 
 ## License
 
