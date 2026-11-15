@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Image Resizer
+Comment=Resize images from GNOME Files
+Exec=/usr/bin/python3 @APP_PATH@ %F
+Icon=image-x-generic
+Terminal=false
+Categories=Graphics;Utility;
+NoDisplay=true
+StartupNotify=true

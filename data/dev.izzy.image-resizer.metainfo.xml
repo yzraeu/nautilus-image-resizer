@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.izzy.image-resizer</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Image Resizer</name>
+  <summary>Resize images from the GNOME Files right-click menu</summary>
+  <description>
+    <p>
+      Adds a Resize Image entry to the right-click menu in GNOME Files.
+      Pick a size by percent, by dimensions, or by target file size,
+      crop if needed, and save over the original or as a copy.
+    </p>
+  </description>
+  <launchable type="desktop-id">dev.izzy.image-resizer.desktop</launchable>
+  <url type="homepage">https://github.com/yzraeu/gnome-shell-extension-image-resize</url>
+  <developer>
+    <name>Israel Rodriguez</name>
+  </developer>
+</component>
