@@ -1485,18 +1485,17 @@ def main(argv: list[str]) -> int:
             return False
 
         def show_front(path, size, nbytes):
-            """A tapped card is the front: caption, crop and estimate follow."""
+            """A tapped card is the front: caption and crop preview follow.
+
+            The resize settings and the output estimate do not. They describe
+            the whole selection, so switching which photo is previewed leaves
+            them alone and nothing needs recalculating.
+            """
             source.update(path=path, size=size, bytes=nbytes)
             if size is not None:
                 pic.set_source_size(size)
                 chain.set_sensitive(True)
                 crop_switch.set_sensitive(True)
-                if crop_state["crop"] is not None:
-                    x, y, width, height = crop_box(size, crop_state["crop"])
-                    commit_crop((round(x), round(y),
-                                 round(width), round(height)))
-                else:
-                    commit_crop(None)
             else:
                 # A header that would not read cannot be cropped.
                 chain.set_sensitive(False)
@@ -1505,8 +1504,9 @@ def main(argv: list[str]) -> int:
                     set_crop_enabled(False)
             update_caption()
             pic.set_label(preview_label(path))
+            update_crop_label()
             update_crop_controls()
-            queue_estimate()
+            crop_area.queue_draw()
 
         def apply_front_texture(path, pixbuf):
             if pic.front_path() == path:

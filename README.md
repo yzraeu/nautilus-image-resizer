@@ -16,7 +16,8 @@ This is a Nautilus plugin plus a small GTK4 / libadwaita app. It is not a GNOME 
 - Select several images and the menu reads **Resize N Images…**; the preview
   throws the first five onto the table as a scattered pile, each photo with a
   white print border. The front card is the active image; click a back card to
-  bring it to the front and the caption, crop and output estimate follow it.
+  bring it to the front and the caption and crop preview follow it. The resize
+  settings and the output estimate stay put — they cover the whole selection.
   The pile is rolled from a fresh seed every time the window opens, and the
   photos fall into it once on open.
 - Resize modes: percent, exact dimensions (with a crop-aware aspect lock), and
