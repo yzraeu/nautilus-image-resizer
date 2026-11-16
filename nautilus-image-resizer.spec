@@ -43,7 +43,7 @@ make test
 
 %files
 %license LICENSE
-%doc README.md
+%doc README.md docs
 %{_datadir}/nautilus-image-resizer/image_resizer.py
 %{_datadir}/nautilus-image-resizer/resize_engine.py
 %{_datadir}/nautilus-python/extensions/image_resizer_extension.py
