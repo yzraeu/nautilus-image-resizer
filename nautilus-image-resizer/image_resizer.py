@@ -10,6 +10,7 @@ Importing this module has no side effects beyond defining the engine.
 
 from __future__ import annotations
 
+import gettext
 import io
 import math
 import sys
@@ -21,6 +22,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
+
+
+def _translation():
+    """User-installed catalogs first, then the system ones."""
+    for localedir in (str(Path.home() / ".local/share/locale"),
+                      "/usr/share/locale"):
+        t = gettext.translation("nautilus-image-resizer", localedir=localedir,
+                                fallback=True)
+        if isinstance(t, gettext.GNUTranslations):
+            return t.gettext
+    return gettext.gettext
+
+
+_ = _translation()
 
 APP_ID = "dev.izzy.image-resizer"
 APP_NAME = "Nautilus Image Resizer"
@@ -114,12 +129,12 @@ def load_image(path: str, max_size: tuple[int, int] | None = None):
             im.draft(im.mode, (max(1, max_size[0]), max(1, max_size[1])))
         im.load()
     except (OSError, UnidentifiedImageError, ValueError) as exc:
-        raise ResizeError("not a readable image") from exc
+        raise ResizeError(_("not a readable image")) from exc
     if getattr(im, "is_animated", False) or getattr(im, "n_frames", 1) > 1:
-        raise ResizeError("animated/multi-frame images are not supported")
+        raise ResizeError(_("animated/multi-frame images are not supported"))
     fmt = im.format
     if fmt not in SUPPORTED:
-        raise ResizeError(f"{fmt} files are not supported")
+        raise ResizeError(_("{} files are not supported").format(fmt))
     icc = im.info.get("icc_profile")
     # exif_transpose copies the raster even when the image is already upright,
     # so only pay for it when the tag asks for a transform. It is also what
@@ -250,6 +265,37 @@ def crop_drag_rect(ax: float, ay: float, bx: float, by: float,
     return (ax if dx >= 0 else ax - w), (ay if dy >= 0 else ay - h), w, h
 
 
+def crop_move_rect(rect, dx, dy, size) -> tuple[int, int, int, int]:
+    """Translate a crop rect by (dx, dy), keeping it inside `size`."""
+    width, height = size
+    x, y, w, h = (round(v) for v in rect)
+    w, h = min(width, max(16, w)), min(height, max(16, h))
+    x = max(0, min(x + round(dx), width - w))
+    y = max(0, min(y + round(dy), height - h))
+    return x, y, w, h
+
+
+def crop_resize_rect(rect, dw, dh, size, aspect=None) -> tuple[int, int, int, int]:
+    """Grow/shrink a crop rect from its top-left corner, clamped to `size`."""
+    width, height = size
+    x, y, w, h = (round(v) for v in rect)
+    if aspect:
+        if dw == 0 and dh != 0:
+            h = max(16, h + round(dh))
+            w = round(h * aspect)
+        else:
+            w = max(16, w + round(dw))
+        w = min(w, width - x)
+        h = round(w / aspect)
+        if h > height - y:
+            h = max(16, height - y)
+            w = min(width - x, max(16, round(h * aspect)))
+    else:
+        w = min(max(16, w + round(dw)), width - x)
+        h = min(max(16, h + round(dh)), height - y)
+    return x, y, w, h
+
+
 def apply_crop(im: Image.Image, crop: dict) -> Image.Image:
     x, y, cw, ch = crop_box(im.size, crop)
     if (x, y, cw, ch) == (0, 0, im.width, im.height):
@@ -299,7 +345,7 @@ def encode_target(im: Image.Image, fmt: str, exif, icc,
         if fits:
             return data, None, (w, h)
         if max(w, h) <= MIN_EDGE:
-            return data, "target not reached (wrote smallest result)", (w, h)
+            return data, _("target not reached (wrote smallest result)"), (w, h)
         w = max(1, round(w * SCALE_STEP))
         h = max(1, round(h * SCALE_STEP))
         cur = cur.resize((w, h), Image.Resampling.LANCZOS)
@@ -499,15 +545,18 @@ def main(argv: list[str]) -> int:
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
-        subtitle = f"{n} images selected" if n > 1 else "Select the size and hit Resize"
+        subtitle = (_("{} images selected").format(n) if n > 1
+                    else _("Select the size and hit Resize"))
         title = Adw.WindowTitle(title=APP_NAME, subtitle=subtitle)
         header.set_title_widget(title)
 
         menu = Gio.Menu()
-        menu.append(f"About {APP_NAME}", "win.about")
+        menu.append(_("About {}").format(APP_NAME), "win.about")
         menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic",
                                      menu_model=menu,
-                                     tooltip_text="Main Menu")
+                                     tooltip_text=_("Main Menu"))
+        menu_button.update_property(
+            [Gtk.AccessibleProperty.LABEL], [_("Main Menu")])
         header.pack_end(menu_button)
 
         def show_about(*_a):
@@ -523,7 +572,7 @@ def main(argv: list[str]) -> int:
                 license_type=Gtk.License.GPL_3_0,
             )
             about.add_acknowledgement_section(
-                "Dependencies",
+                _("Dependencies"),
                 ["Pillow (MIT-CMU)",
                  "GTK 4 (LGPL-2.1-or-later)",
                  "libadwaita (LGPL-2.1-or-later)",
@@ -621,11 +670,16 @@ def main(argv: list[str]) -> int:
 
             PAD = 10  # px each back card is offset from the one in front of it
 
-            def __init__(self, front, backs, source_size):
+            def __init__(self, front, backs, source_size, label):
                 super().__init__()
                 self._front = front
                 self._backs = backs        # nearest card first
                 self._source_size = source_size
+                self.set_accessible_role(Gtk.AccessibleRole.IMG)
+                self.update_property([Gtk.AccessibleProperty.LABEL], [label])
+
+            def set_label(self, label):
+                self.update_property([Gtk.AccessibleProperty.LABEL], [label])
 
             def do_measure(self, orientation, _for_size):
                 if orientation == Gtk.Orientation.VERTICAL:
@@ -701,12 +755,19 @@ def main(argv: list[str]) -> int:
                 self._card(snapshot, self._front, (x, y, width, height),
                            radius, 1.0, False)
 
-        pic = PreviewDeck(None, [], source["size"])
+        pic = PreviewDeck(None, [], source["size"], _("Image preview"))
 
         overlay = Gtk.Overlay()
         overlay.set_child(pic)
         crop_area = Gtk.DrawingArea()
         crop_area.set_can_target(False)
+        crop_area.set_focusable(False)
+        crop_area.set_accessible_role(Gtk.AccessibleRole.GROUP)
+        crop_area.update_property([Gtk.AccessibleProperty.LABEL],
+                                  [_("Crop selection area")])
+        crop_area.update_property(
+            [Gtk.AccessibleProperty.DESCRIPTION],
+            [_("Arrow keys move the crop region; Shift+arrow keys resize it")])
         overlay.add_overlay(crop_area)
         preview.append(overlay)
 
@@ -745,12 +806,24 @@ def main(argv: list[str]) -> int:
                          (0, ry, rx, rh), (rx + rw, ry, width - rx - rw, rh)):
                 cr.rectangle(*band)
                 cr.fill()
-            cr.set_source_rgba(1, 1, 1, 0.9)
-            cr.set_line_width(2)
+            # Double stroke reads on light and dark photos in any theme; the
+            # wider pass marks keyboard focus on the region.
+            stroke = 3 if crop_area.has_focus() else 2
             cr.rectangle(rx, ry, rw, rh)
+            cr.set_source_rgba(0, 0, 0, 0.9)
+            cr.set_line_width(stroke + 1.5)
+            cr.stroke()
+            cr.rectangle(rx, ry, rw, rh)
+            cr.set_source_rgba(1, 1, 1, 0.95)
+            cr.set_line_width(stroke)
             cr.stroke()
 
         crop_area.set_draw_func(draw_crop)
+
+        focus = Gtk.EventControllerFocus()
+        focus.connect("enter", lambda *_a: crop_area.queue_draw())
+        focus.connect("leave", lambda *_a: crop_area.queue_draw())
+        crop_area.add_controller(focus)
 
         def current_aspect():
             if source["size"] is None:
@@ -763,6 +836,16 @@ def main(argv: list[str]) -> int:
             if base is None:
                 return None
             return (1.0 / base) if crop_state["portrait"] else base
+
+        announce = {"pending": 0}
+
+        def announce_crop():
+            # Coalesce auto-repeat: only the settled geometry is spoken.
+            announce["pending"] = 0
+            if crop_state["on"]:
+                crop_area.announce(crop_label.get_text(),
+                                   Gtk.AccessibleAnnouncementPriority.LOW)
+            return False
 
         def commit_crop(rect):
             previous = crop_state.get("dims") or source["size"]
@@ -777,6 +860,10 @@ def main(argv: list[str]) -> int:
                 crop_state["dims"] = (round(cw), round(ch))
             resize_fields(previous, crop_state["dims"])
             update_crop_label()
+            if crop_state["on"]:
+                if announce["pending"]:
+                    GLib.source_remove(announce["pending"])
+                announce["pending"] = GLib.timeout_add(450, announce_crop)
             update_crop_controls()
             crop_area.queue_draw()
             queue_estimate()
@@ -824,14 +911,52 @@ def main(argv: list[str]) -> int:
         drag.connect("drag-end", on_crop_end)
         crop_area.add_controller(drag)
 
+        def crop_step(length):
+            return max(1, round(length / 100.0))
+
+        def nudge_crop(keyval, shift):
+            size = source["size"]
+            if size is None:
+                return False
+            if crop_state["crop"] is None:
+                half = (round(size[0] / 4), round(size[1] / 4),
+                        round(size[0] / 2), round(size[1] / 2))
+                rect = (crop_refit_rect(half, crop_state["aspect"])
+                        if crop_state["aspect"] else half)
+                commit_crop(rect)
+            x, y, cw, ch = crop_box(size, crop_state["crop"])
+            step_x = crop_step(size[0]) * (10 if shift else 1)
+            step_y = crop_step(size[1]) * (10 if shift else 1)
+            dx = (step_x if keyval == Gdk.KEY_Right
+                  else -step_x if keyval == Gdk.KEY_Left else 0)
+            dy = (step_y if keyval == Gdk.KEY_Down
+                  else -step_y if keyval == Gdk.KEY_Up else 0)
+            if shift:
+                rect = crop_resize_rect((x, y, cw, ch), dx, dy, size,
+                                        crop_state["aspect"])
+            else:
+                rect = crop_move_rect((x, y, cw, ch), dx, dy, size)
+            commit_crop(rect)
+            return True
+
+        def on_crop_key(_controller, keyval, _keycode, state):
+            if keyval not in (Gdk.KEY_Left, Gdk.KEY_Right,
+                              Gdk.KEY_Up, Gdk.KEY_Down):
+                return False
+            return nudge_crop(keyval, bool(state & Gdk.ModifierType.SHIFT_MASK))
+
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", on_crop_key)
+        crop_area.add_controller(keys)
+
         def update_caption():
             size = source["size"]
             if n > 1:
                 details = [_human_size(source["total"])] if source["probed"] else []
-                details.append(f"{n} images selected")
+                details.append(_("{} images selected").format(n))
             else:
                 if size is None:
-                    details = ["reading…" if not source["probed"] else "unreadable"]
+                    details = [_("reading…") if not source["probed"] else _("unreadable")]
                 else:
                     details = [f"{size[0]}×{size[1]}"]
                 if source["bytes"]:
@@ -857,11 +982,11 @@ def main(argv: list[str]) -> int:
             crop = crop_state["crop"]
             if crop is None:
                 crop_label.set_visible(crop_state["on"])
-                crop_label.set_text("Drag on the preview to select the crop region")
+                crop_label.set_text(_("Drag on the preview to select the crop region"))
                 return
             x, y, cw, ch = crop_box(source["size"], crop)
             crop_label.set_visible(True)
-            crop_label.set_text(f"Crop {cw} × {ch} px at {x}, {y}")
+            crop_label.set_text(_("Crop {} × {} px at {}, {}").format(cw, ch, x, y))
 
         def set_crop_enabled(active):
             if crop_state["on"] == active and crop_switch.get_active() == active:
@@ -869,6 +994,7 @@ def main(argv: list[str]) -> int:
             crop_state["on"] = active
             crop_switch.set_active(active)
             crop_area.set_can_target(active)
+            crop_area.set_focusable(active)
             if active:
                 crop_area.set_cursor(Gdk.Cursor.new_from_name("crosshair"))
                 crop_state["aspect"] = current_aspect()
@@ -876,6 +1002,8 @@ def main(argv: list[str]) -> int:
                     commit_crop(crop_fit_rect(source["size"], crop_state["aspect"]))
                 else:
                     commit_crop(crop_state["crop"])
+                if source["size"] is not None:
+                    crop_area.grab_focus()
             else:
                 crop_state["origin"] = None
                 crop_state["live"] = None
@@ -908,13 +1036,13 @@ def main(argv: list[str]) -> int:
         grp_pct = Adw.PreferencesGroup()
         pct_adj = Gtk.Adjustment(value=50, lower=1, upper=1000, step_increment=1)
         pct_row = Adw.SpinRow(adjustment=pct_adj, climb_rate=1, digits=0)
-        pct_row.set_title("Scale (%)")
+        pct_row.set_title(_("Scale (%)"))
         grp_pct.add(pct_row)
-        pct_out = Adw.ActionRow(title="Output")
+        pct_out = Adw.ActionRow(title=_("Output"))
         pct_out.set_subtitle("—")
         grp_pct.add(pct_out)
         page_pct.append(grp_pct)
-        stack.add_titled(page_pct, "percent", "Percentage")
+        stack.add_titled(page_pct, "percent", _("Percentage"))
         stack.get_page(page_pct).set_icon_name("percent-symbolic")
 
         # Dimensions
@@ -926,9 +1054,9 @@ def main(argv: list[str]) -> int:
         w_adj = Gtk.Adjustment(value=w0, lower=1, upper=30000, step_increment=1)
         h_adj = Gtk.Adjustment(value=h0, lower=1, upper=30000, step_increment=1)
         w_row = Adw.SpinRow(adjustment=w_adj, climb_rate=1, digits=0)
-        w_row.set_title("Width (px)")
+        w_row.set_title(_("Width (px)"))
         h_row = Adw.SpinRow(adjustment=h_adj, climb_rate=1, digits=0)
-        h_row.set_title("Height (px)")
+        h_row.set_title(_("Height (px)"))
 
         chain = Gtk.ToggleButton()
         chain.set_valign(Gtk.Align.CENTER)
@@ -986,12 +1114,16 @@ def main(argv: list[str]) -> int:
             h_adj.set_value(new_dims[1])
             syncing["active"] = False
 
+        chain.update_property([Gtk.AccessibleProperty.LABEL],
+                              [_("Lock aspect ratio")])
+        chain.update_property([Gtk.AccessibleProperty.DESCRIPTION],
+                              [_("Keeps the width-to-height ratio while resizing")])
+
         def set_chain_state(active: bool):
             chain_icon.set_from_icon_name(
                 "changes-prevent-symbolic" if active else "changes-allow-symbolic")
-            label = "Aspect ratio locked" if active else "Aspect ratio unlocked"
-            chain.set_tooltip_text(label)
-            chain.update_property([Gtk.AccessibleProperty.LABEL], [label])
+            chain.set_tooltip_text(_("Aspect ratio locked") if active
+                                   else _("Aspect ratio unlocked"))
 
         set_chain_state(lock)
 
@@ -1027,11 +1159,11 @@ def main(argv: list[str]) -> int:
 
         grp_dim.add(w_row)
         grp_dim.add(h_row)
-        dim_out = Adw.ActionRow(title="Output")
+        dim_out = Adw.ActionRow(title=_("Output"))
         dim_out.set_subtitle("—")
         grp_dim.add(dim_out)
         page_dim.append(grp_dim)
-        stack.add_titled(page_dim, "dimensions", "Dimensions")
+        stack.add_titled(page_dim, "dimensions", _("Dimensions"))
         stack.get_page(page_dim).set_icon_name("zoom-fit-best-symbolic")
 
         # File size
@@ -1040,13 +1172,13 @@ def main(argv: list[str]) -> int:
         size_adj = Gtk.Adjustment(value=500, lower=1, upper=102400,
                                   step_increment=1)
         size_row = Adw.SpinRow(adjustment=size_adj, climb_rate=1, digits=0)
-        size_row.set_title("Target maximum size (KB)")
+        size_row.set_title(_("Target maximum size (KB)"))
         grp_size.add(size_row)
-        size_out = Adw.ActionRow(title="Output")
+        size_out = Adw.ActionRow(title=_("Output"))
         size_out.set_subtitle("—")
         grp_size.add(size_out)
         page_size.append(grp_size)
-        stack.add_titled(page_size, "filesize", "File Size")
+        stack.add_titled(page_size, "filesize", _("File Size"))
         stack.get_page(page_size).set_icon_name("file-size-symbolic")
 
         stack.set_visible_child_name("dimensions")
@@ -1054,19 +1186,21 @@ def main(argv: list[str]) -> int:
 
         # --- crop settings -------------------------------------------------- #
         crop_group = Adw.PreferencesGroup()
-        crop_expander = Adw.ExpanderRow(title="Crop", subtitle="Off")
+        crop_expander = Adw.ExpanderRow(title=_("Crop"), subtitle=_("Off"))
         crop_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
         crop_switch.set_sensitive(False)
+        crop_switch.update_property([Gtk.AccessibleProperty.LABEL],
+                                    [_("Enable crop")])
         crop_expander.add_suffix(crop_switch)
         crop_group.add(crop_expander)
 
         def crop_subtitle():
             if not crop_state["on"]:
-                return "Off"
+                return _("Off")
             if crop_state["crop"] is None:
-                return "Drag on the preview to pick a region"
+                return _("Drag on the preview to pick a region")
             x, y, cw, ch = crop_box(source["size"], crop_state["crop"])
-            return f"{cw} × {ch} px at {x}, {y}"
+            return _("{} × {} px at {}, {}").format(cw, ch, x, y)
 
         def update_crop_controls():
             enabled = crop_state["on"]
@@ -1077,13 +1211,8 @@ def main(argv: list[str]) -> int:
 
         def on_preset_selected(button, name):
             if not button.get_active():
-                if crop_state["preset"] == name:
-                    button.set_active(True)   # presets behave as a radio group
                 return
             crop_state["preset"] = name
-            for other_name, other in preset_buttons.items():
-                if other_name != name and other.get_active():
-                    other.set_active(False)
             reapply_aspect()
 
         def on_portrait_toggled(button):
@@ -1115,7 +1244,7 @@ def main(argv: list[str]) -> int:
         preset_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         preset_body.set_margin_top(6)
         preset_body.set_margin_bottom(6)
-        preset_caption = Gtk.Label(label="Ratio", xalign=0.0)
+        preset_caption = Gtk.Label(label=_("Ratio"), xalign=0.0)
         preset_caption.add_css_class("dim-label")
         preset_caption.add_css_class("caption")
         preset_body.append(preset_caption)
@@ -1132,7 +1261,7 @@ def main(argv: list[str]) -> int:
         original_aspect = 4 / 3          # redrawn once the real size is known
         original_glyph = None
         for name, aspect in CROP_PRESETS.items():
-            label = {"free": "Free", "original": "Original"}.get(name, name)
+            label = {"free": _("Free"), "original": _("Original")}.get(name, name)
             if name == "original":
                 aspect = original_aspect
             dashed = name == "free"
@@ -1152,15 +1281,18 @@ def main(argv: list[str]) -> int:
             content.append(glyph)
             content.append(text)
             button.set_child(content)
+            button.set_size_request(64, 48)
             button.connect("toggled", on_preset_selected, name)
+            if preset_buttons:
+                button.set_group(preset_buttons["free"])
             preset_flow.append(button)
             preset_buttons[name] = button
         crop_expander.add_row(preset_row)
 
-        orient_row = Adw.ActionRow(title="Orientation")
-        portrait = Gtk.ToggleButton(label="Portrait")
+        orient_row = Adw.ActionRow(title=_("Orientation"))
+        portrait = Gtk.ToggleButton(label=_("Portrait"))
         portrait.set_valign(Gtk.Align.CENTER)
-        portrait.set_tooltip_text("Swap the crop ratio to portrait")
+        portrait.set_tooltip_text(_("Swap the crop ratio to portrait"))
         portrait.connect("toggled", on_portrait_toggled)
         orient_row.add_suffix(portrait)
         crop_expander.add_row(orient_row)
@@ -1172,14 +1304,11 @@ def main(argv: list[str]) -> int:
         update_crop_controls()
 
         # --- output ------------------------------------------------------- #
-        out_group = Adw.PreferencesGroup(title="Output")
-        overwrite_row = Adw.ActionRow(title="Overwrite original files")
-        overwrite_row.set_activatable(True)
-        switch = Gtk.Switch(valign=Gtk.Align.CENTER)
-        overwrite_row.add_suffix(switch)
+        out_group = Adw.PreferencesGroup(title=_("Output"))
+        overwrite_row = Adw.SwitchRow(title=_("Overwrite original files"))
         out_group.add(overwrite_row)
 
-        suffix_row = Adw.EntryRow(title="New-file suffix")
+        suffix_row = Adw.EntryRow(title=_("New-file suffix"))
         suffix_row.set_text("_resized")
         out_group.add(suffix_row)
         box.append(out_group)
@@ -1187,12 +1316,12 @@ def main(argv: list[str]) -> int:
         # --- buttons ------------------------------------------------------ #
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         buttons.set_halign(Gtk.Align.END)
-        cancel = Gtk.Button(label="Cancel")
-        resize = Gtk.Button(label="Resize")
+        cancel = Gtk.Button(label=_("Cancel"))
+        resize = Gtk.Button(label=_("Resize"))
         resize.add_css_class("suggested-action")
         resize.add_css_class("pill")
         cancel.add_css_class("pill")
-        reset = Gtk.Button(label="Reset")
+        reset = Gtk.Button(label=_("Reset"))
         reset.add_css_class("pill")
         buttons.append(cancel)
         buttons.append(reset)
@@ -1228,20 +1357,33 @@ def main(argv: list[str]) -> int:
         root.append(buttons)
         toolbar.set_content(root)
         win.set_content(toolbar)
+        win.set_default_widget(resize)
+
+        close_action = Gio.SimpleAction.new("close", None)
+        close_action.connect("activate", lambda *_: win.close())
+        win.add_action(close_action)
+
+        def on_window_key(_controller, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                win.close()
+                return True
+            return False
+
+        window_keys = Gtk.EventControllerKey()
+        window_keys.connect("key-pressed", on_window_key)
+        win.add_controller(window_keys)
 
         def update_sensitive(*_a):
-            ready = source["probed"] and (switch.get_active()
+            ready = source["probed"] and (overwrite_row.get_active()
                                           or bool(suffix_row.get_text().strip()))
             resize.set_sensitive(ready)
 
         def on_switch(*_a):
-            suffix_row.set_visible(not switch.get_active())
+            suffix_row.set_visible(not overwrite_row.get_active())
             update_sensitive()
 
-        switch.connect("notify::active", on_switch)
+        overwrite_row.connect("notify::active", on_switch)
         suffix_row.connect("notify::text", update_sensitive)
-        overwrite_row.connect("activated",
-                              lambda *_: switch.set_active(not switch.get_active()))
         update_sensitive()
 
         # --- live output estimate ------------------------------------------ #
@@ -1255,12 +1397,12 @@ def main(argv: list[str]) -> int:
             spinners[name] = spinner
 
         def px_line(size):
-            return f"{size[0]} × {size[1]} px"
+            return _("{} × {} px").format(size[0], size[1])
 
         def bytes_line(nbytes):
-            line = f"≈ {nbytes / 1024:,.0f} KB"
+            line = _("≈ {:,.0f} KB").format(nbytes / 1024)
             if nbytes >= 1048576:
-                line += f" ({nbytes / 1048576:.2f} MB)"
+                line += _(" ({:.2f} MB)").format(nbytes / 1048576)
             return line
 
         def pct_line(size):
@@ -1271,7 +1413,7 @@ def main(argv: list[str]) -> int:
                 _x, _y, cw, ch = crop_box(source["size"], crop_state["crop"])
                 base = (cw, ch)
             area = (size[0] * size[1]) / (base[0] * base[1])
-            return f"{100.0 * math.sqrt(area):.0f} %"
+            return _("{:.0f} %").format(100.0 * math.sqrt(area))
 
         def params_for(mode):
             if mode == "percent":
@@ -1293,6 +1435,9 @@ def main(argv: list[str]) -> int:
             for name, row in outputs.items():
                 row.set_subtitle(text if name == active else "—")
                 spinners[name].set_visible(busy and name == active)
+            if busy:
+                outputs[active].announce(
+                    text, Gtk.AccessibleAnnouncementPriority.LOW)
 
         def stop_spinner(mode):
             spinners[mode].set_visible(False)
@@ -1303,7 +1448,9 @@ def main(argv: list[str]) -> int:
             row = outputs[mode]
             stop_spinner(mode)
             if not results:
-                row.set_subtitle(f"estimate failed: {error}")
+                text = _("estimate failed: {}").format(error)
+                row.set_subtitle(text)
+                row.announce(text, Gtk.AccessibleAnnouncementPriority.LOW)
                 return False
             if len(results) == 1:
                 result = results[0]
@@ -1321,18 +1468,20 @@ def main(argv: list[str]) -> int:
                 total_bytes = sum(result["bytes"] for result in results)
                 sizes = {tuple(result["size"]) for result in results}
                 if mode == "percent":
-                    parts = [f"{pct_adj.get_value():.0f} %"]
+                    parts = [_("{:.0f} %").format(pct_adj.get_value())]
                 elif len(sizes) == 1:
                     parts = [px_line(results[0]["size"])]
                 elif mode == "dimensions":
-                    parts = ["sizes vary"]
+                    parts = [_("sizes vary")]
                 else:
                     parts = []
-                parts.append(f"total {bytes_line(total_bytes)}")
-                parts.append(f"{len(results)} images")
+                parts.append(_("total {}").format(bytes_line(total_bytes)))
+                parts.append(_("{} images").format(len(results)))
             if skipped:
-                parts.append(f"{skipped} skipped")
-            row.set_subtitle(" · ".join(part for part in parts if part))
+                parts.append(_("{} skipped").format(skipped))
+            text = " · ".join(part for part in parts if part)
+            row.set_subtitle(text)
+            row.announce(text, Gtk.AccessibleAnnouncementPriority.LOW)
             return False
 
         def run_estimate(token, mode, params):
@@ -1357,7 +1506,7 @@ def main(argv: list[str]) -> int:
                 state["pending"] = 0
                 mode = stack.get_visible_child_name()
                 params = params_for(mode)
-                show_status("Calculating…", busy=True)
+                show_status(_("Calculating…"), busy=True)
                 threading.Thread(target=run_estimate,
                                  args=(token, mode, params), daemon=True).start()
                 return False
@@ -1369,9 +1518,24 @@ def main(argv: list[str]) -> int:
             adj.connect("value-changed", queue_estimate)
         chain.connect("toggled", queue_estimate)
 
-        def finish(_results):
-            # No summary dialog: the window just goes away when the work is done.
-            win.close()
+        def finish(results):
+            failed = [result for result in results if not result.ok]
+            if not failed:
+                # The window just goes away when the work is done.
+                win.close()
+                return
+            cancel.set_sensitive(True)
+            reset.set_sensitive(True)
+            resize.set_label(_("Resize"))
+            update_sensitive()
+            dialog = Gtk.AlertDialog(
+                message=_("{} of {} images could not be resized").format(
+                    len(failed), len(results)),
+                detail="; ".join(_("{} — {}").format(Path(result.src).name,
+                                                    result.note)
+                                 for result in failed),
+                modal=True)
+            dialog.show(win)
 
         def worker(jobs):
             results = [process_file(src, dst, mode, params)
@@ -1395,7 +1559,7 @@ def main(argv: list[str]) -> int:
             syncing["active"] = False
             chain.set_active(lock)
             size_adj.set_value(500)
-            switch.set_active(False)
+            overwrite_row.set_active(False)
             suffix_row.set_text("_resized")
             stack.set_visible_child_name("dimensions")
             update_crop_controls()
@@ -1405,7 +1569,7 @@ def main(argv: list[str]) -> int:
             mode = stack.get_visible_child_name()
             params = params_for(mode)
 
-            overwrite = switch.get_active()
+            overwrite = overwrite_row.get_active()
             suffix = suffix_row.get_text()
             jobs = []
             for src in paths:
@@ -1419,7 +1583,7 @@ def main(argv: list[str]) -> int:
             resize.set_sensitive(False)
             cancel.set_sensitive(False)
             reset.set_sensitive(False)
-            resize.set_label("Resizing…")
+            resize.set_label(_("Resizing…"))
             threading.Thread(target=worker, args=(jobs,), daemon=True).start()
 
         def apply_source(path, size, nbytes, total, front, backs):
@@ -1442,6 +1606,13 @@ def main(argv: list[str]) -> int:
             else:
                 chain.set_active(False)   # toggled() flips the icon too
             update_caption()
+            if size is not None and front is not None:
+                preview_label = _("Image preview: {}").format(Path(path).name)
+                if n > 1:
+                    preview_label += _(", plus {} more images").format(n - 1)
+            else:
+                preview_label = _("Image preview (unavailable)")
+            pic.set_label(preview_label)
             update_crop_controls()
             apply_textures(front, backs)
             update_sensitive()
@@ -1459,6 +1630,7 @@ def main(argv: list[str]) -> int:
         win.present()
 
     app.connect("activate", on_activate)
+    app.set_accels_for_action("win.close", ["<Control>w"])
     app.run([])
     return 0
 

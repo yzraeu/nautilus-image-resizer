@@ -84,10 +84,12 @@ nautilus -q
 3. Pick Percent, Dimensions, or File Size. The **Output** line under the
    current mode updates as you change it.
 4. To cut the image first, expand **Crop**, flip its switch on, pick a ratio
-   (or leave it on Free) and drag on the preview. **Portrait** swaps the ratio;
+   (or leave it on Free) and drag on the preview — or focus the preview and use
+   the arrow keys (Shift+arrow resizes the region). **Portrait** swaps the ratio;
    the dimension fields and the **Output** estimate follow.
 5. Choose overwrite or a suffix, then hit **Resize**. The window closes and the
-   results are in Files.
+   results are in Files; if any file failed, the window stays open and says
+   which ones and why.
 
 The app can also be run directly, for testing:
 

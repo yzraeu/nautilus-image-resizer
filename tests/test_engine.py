@@ -103,6 +103,53 @@ class CropGeometryTests(unittest.TestCase):
         self.assertLessEqual(y + h, 800)
 
 
+class CropKeyboardTests(unittest.TestCase):
+    """Arrow-key crop manipulation: rect math, same conventions as crop_drag_rect."""
+
+    SIZE = (800, 600)
+
+    def test_move_translates_the_rect(self):
+        self.assertEqual(engine.crop_move_rect((100, 100, 200, 150), 50, -20, self.SIZE),
+                         (150, 80, 200, 150))
+
+    def test_move_clamps_to_the_image(self):
+        self.assertEqual(engine.crop_move_rect((100, 100, 200, 150), 900, -900, self.SIZE),
+                         (600, 0, 200, 150))
+
+    def test_resize_without_aspect_grows_the_rect(self):
+        self.assertEqual(engine.crop_resize_rect((10, 20, 100, 80), 40, 30, self.SIZE),
+                         (10, 20, 140, 110))
+
+    def test_resize_keeps_a_locked_aspect(self):
+        x, y, w, h = engine.crop_resize_rect((0, 0, 100, 100), 40, 0, self.SIZE, aspect=1.5)
+        self.assertEqual((x, y), (0, 0))
+        self.assertAlmostEqual(w / h, 1.5, delta=0.02)
+
+    def test_resize_from_the_height_when_the_width_step_is_zero(self):
+        _x, _y, w, h = engine.crop_resize_rect((0, 0, 100, 100), 0, 30, self.SIZE, aspect=2.0)
+        self.assertEqual(h, 130)
+        self.assertEqual(w, 260)
+
+    def test_resize_clamps_to_the_image(self):
+        x, y, w, h = engine.crop_resize_rect((700, 500, 100, 100), 500, 500, self.SIZE)
+        self.assertEqual((x + w, y + h), self.SIZE)
+
+    def test_resize_keeps_the_anchor_at_the_image_edge(self):
+        # No room to grow: the rect stops growing instead of sliding left.
+        self.assertEqual(engine.crop_resize_rect((700, 500, 100, 100), 80, 0, self.SIZE),
+                         (700, 500, 100, 100))
+
+    def test_aspect_survives_the_image_edge(self):
+        _x, _y, w, h = engine.crop_resize_rect((0, 0, 500, 500), 200, 0,
+                                              (800, 600), aspect=1.0)
+        self.assertEqual((w, h), (600, 600))
+
+    def test_resize_never_shrinks_below_the_minimum(self):
+        x, y, w, h = engine.crop_resize_rect((0, 0, 20, 20), -500, -500, self.SIZE)
+        self.assertGreaterEqual(w, 16)
+        self.assertGreaterEqual(h, 16)
+
+
 class CropProcessingTests(unittest.TestCase):
     def test_crop_then_resize(self):
         with tempfile.TemporaryDirectory() as tmp:

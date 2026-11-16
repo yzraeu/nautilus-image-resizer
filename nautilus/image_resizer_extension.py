@@ -1,5 +1,6 @@
 """Nautilus menu provider: "Resize Image…" for selected image files."""
 
+import gettext
 import subprocess
 from pathlib import Path
 
@@ -7,6 +8,20 @@ import gi
 
 gi.require_version("Nautilus", "4.1")
 from gi.repository import GObject, Nautilus  # noqa: E402
+
+
+def _translation():
+    """User-installed catalogs first, then the system ones."""
+    for localedir in (str(Path.home() / ".local/share/locale"),
+                      "/usr/share/locale"):
+        t = gettext.translation("nautilus-image-resizer", localedir=localedir,
+                                fallback=True)
+        if isinstance(t, gettext.GNUTranslations):
+            return t.gettext
+    return gettext.gettext
+
+
+_ = _translation()
 
 # Where the GUI app lives. System install first, then a user install.
 # A system package puts it in /usr/share, `make install` puts it in ~/.local.
@@ -19,8 +34,8 @@ GUI_CANDIDATES = (
 
 def _menu_label(count):
     if count == 1:
-        return "Resize Image…"
-    return f"Resize {count} Images…"
+        return _("Resize Image…")
+    return _("Resize {} Images…").format(count)
 
 
 def _find_gui():
