@@ -15,6 +15,7 @@ import math
 import sys
 import threading
 import warnings
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,10 +59,54 @@ class JobResult:
 # Engine
 # --------------------------------------------------------------------------- #
 
-def load_image(path: str):
-    """Return (transposed image, source format, exif bytes, icc bytes)."""
+# EXIF Orientation values: 2-4 mirror/rotate without swapping the axes, 5-8
+# additionally swap width and height.
+EXIF_TRANSFORMS = {2, 3, 4, 5, 6, 7, 8}
+EXIF_SWAPS_AXES = {5, 6, 7, 8}
+
+
+def exif_orientation(im: Image.Image) -> int | None:
+    try:
+        orientation = im.getexif().get(0x0112)
+    except (OSError, ValueError, SyntaxError, TypeError):
+        return None
+    return orientation if isinstance(orientation, int) else None
+
+
+def oriented_size(im: Image.Image) -> tuple[int, int]:
+    """Displayed pixel size from an opened image's header, without decoding."""
+    if exif_orientation(im) in EXIF_SWAPS_AXES:
+        return im.height, im.width
+    return im.width, im.height
+
+
+def decode_bound(source_size: tuple[int, int],
+                 target: tuple[int, int]) -> tuple[int, int]:
+    """Coarsest 1/1, 1/2, 1/4, 1/8 decode that still covers `target`.
+
+    Decoders only scale by powers of two, so asking for the exact target buys
+    nothing and would give every tiny parameter change its own cache entry.
+    """
+    width, height = source_size
+    factor = 1.0
+    while factor > 0.125:
+        half = factor / 2
+        if width * half < target[0] or height * half < target[1]:
+            break
+        factor = half
+    return max(1, round(width * factor)), max(1, round(height * factor))
+
+
+def load_image(path: str, max_size: tuple[int, int] | None = None):
+    """Return (transposed image, source format, exif bytes, icc bytes).
+
+    `max_size` is a pixel bound the caller will never enlarge beyond; JPEG
+    decoders then hand back a DCT-scaled raster instead of the full one.
+    """
     try:
         im = Image.open(path)
+        if max_size is not None and im.mode in ("RGB", "L"):
+            im.draft(im.mode, (max(1, max_size[0]), max(1, max_size[1])))
         im.load()
     except (OSError, UnidentifiedImageError, ValueError) as exc:
         raise ResizeError("not a readable image") from exc
@@ -71,13 +116,50 @@ def load_image(path: str):
     if fmt not in SUPPORTED:
         raise ResizeError(f"{fmt} files are not supported")
     icc = im.info.get("icc_profile")
-    im = ImageOps.exif_transpose(im)
-    # EXIF of the *transposed* image: exif_transpose drops the Orientation tag,
-    # so the written file is never rotated a second time by viewers.
+    # exif_transpose copies the raster even when the image is already upright,
+    # so only pay for it when the tag asks for a transform. It is also what
+    # drops the Orientation tag, keeping viewers from rotating the written file
+    # a second time.
+    if exif_orientation(im) in EXIF_TRANSFORMS:
+        im = ImageOps.exif_transpose(im)
     exif = im.info.get("exif")
     if im.mode not in ("RGB", "RGBA", "L", "LA", "P", "CMYK", "I;16", "I"):
         im = im.convert("RGB")
     return im, fmt, exif, icc
+
+
+# Decoding a 24 MP photo costs ~100 ms, and every spinbox notch re-decoded
+# every selected file. Keep recent decodes while the file and the pixel bound
+# are unchanged; the estimate only reads them, so one entry can serve many
+# passes.
+CACHE_BUDGET = 256 * 1024 * 1024
+_cache_lock = threading.Lock()
+# key -> ((image, fmt, exif, icc), footprint in bytes)
+_cache: "OrderedDict[tuple, tuple[tuple, int]]" = OrderedDict()
+
+
+def cached_load_image(path: str, max_size: tuple[int, int] | None = None):
+    """`load_image`, reusing a previous decode of the same file. Read-only."""
+    try:
+        info = Path(path).stat()
+    except OSError:
+        return load_image(path, max_size)
+    key = (path, info.st_mtime_ns, info.st_size, max_size)
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit is not None:
+            _cache.move_to_end(key)
+            return hit[0]
+    loaded = load_image(path, max_size)
+    footprint = loaded[0].width * loaded[0].height * len(loaded[0].getbands())
+    with _cache_lock:
+        _cache[key] = (loaded, footprint)
+        _cache.move_to_end(key)
+        total = sum(weight for _entry, weight in _cache.values())
+        while total > CACHE_BUDGET and len(_cache) > 1:
+            _old_key, (_old_entry, old_weight) = _cache.popitem(last=False)
+            total -= old_weight
+    return loaded
 
 
 def compute_size(w: int, h: int, mode: str, *, percent: float = 0.0,
@@ -226,21 +308,29 @@ def save_image(im: Image.Image, path: str, fmt: str, exif, icc,
     return note
 
 
-def estimate(im: Image.Image, fmt: str, exif, icc, mode: str, params: dict) -> dict:
-    """Predicted pixel size and byte count for the dialog; writes nothing."""
+def estimate(im: Image.Image, fmt: str, exif, icc, mode: str, params: dict,
+             source_size: tuple[int, int] | None = None) -> dict:
+    """Predicted pixel size and byte count for the dialog; writes nothing.
+
+    `source_size` is the original pixel size when `im` was decoded smaller
+    than the file; the sizing maths must use it, not the decode size.
+    """
+    size = source_size or im.size
     crop = params.get("crop")
     if crop:
         im = apply_crop(im, crop)
+        _x, _y, cw, ch = crop_box(size, crop)
+        size = (cw, ch)
     if mode == "filesize":
         data, note, size = encode_target(im, fmt, exif, icc,
                                          int(params["max_bytes"]))
         return {"size": size, "bytes": len(data), "note": note}
     if mode == "dimensions":
-        size = compute_size(im.width, im.height, "dimensions",
+        size = compute_size(size[0], size[1], "dimensions",
                             box=(int(params["width"]), int(params["height"])),
                             lock=bool(params.get("lock", True)))
     elif mode == "percent":
-        size = compute_size(im.width, im.height, "percent",
+        size = compute_size(size[0], size[1], "percent",
                             percent=float(params["percent"]))
     else:
         raise ResizeError(f"unknown sizing mode {mode!r}")
@@ -311,28 +401,21 @@ def main(argv: list[str]) -> int:
         print("Usage: image_resizer.py IMAGE [IMAGE ...]", file=sys.stderr)
         return 1
 
-    # First readable image drives thumbnail and the dimension prefill.
+    # First readable image drives thumbnail and the dimension prefill. Only the
+    # header is read: decoding a 6 MB photo here just to learn two numbers cost
+    # more than building the whole window.
     first_size: tuple[int, int] | None = None
     first_bytes = 0
     first_path = paths[0]
     for p in paths:
         try:
             with Image.open(p) as probe:
-                probe.load()
-                transposed = ImageOps.exif_transpose(probe)
-                first_size = (transposed.width, transposed.height)
+                first_size = oriented_size(probe)
             first_bytes = Path(p).stat().st_size
             first_path = p
             break
         except Exception:
             continue
-
-    src_image = None
-    if first_size is not None:
-        try:
-            src_image = load_image(first_path)
-        except ResizeError:
-            src_image = None
 
     app = Adw.Application(application_id=APP_ID,
                           flags=Gio.ApplicationFlags.NON_UNIQUE)
@@ -405,15 +488,52 @@ def main(argv: list[str]) -> int:
         preview.set_margin_start(12)
         preview.set_margin_end(12)
 
-        def texture_at(path, size):
-            # Decode once at preview size; the widget scales it with the window.
+        def pixbuf_at(path, size):
+            """Decode one image at preview size. Runs in a worker thread."""
+            with Image.open(path) as im:
+                if im.mode in ("RGB", "L"):
+                    # Decode JPEG at DCT scale instead of shrinking afterwards.
+                    im.draft(im.mode, (size, size))
+                im.load()
+                if exif_orientation(im) in EXIF_TRANSFORMS:
+                    im = ImageOps.exif_transpose(im)
+                if im.mode != "RGB":
+                    alpha = "A" in im.getbands() or "transparency" in im.info
+                    im = im.convert("RGBA" if alpha else "RGB")
+                im.thumbnail((size, size), Image.Resampling.BILINEAR)
+                channels = 4 if im.mode == "RGBA" else 3
+                return GdkPixbuf.Pixbuf.new_from_bytes(
+                    GLib.Bytes.new(im.tobytes()), GdkPixbuf.Colorspace.RGB,
+                    channels == 4, 8, im.width, im.height, im.width * channels)
+
+        def build_textures():
+            """Preview stills for every selected file; the window shows first."""
             try:
-                pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
+                front = pixbuf_at(first_path, 900)
+            except Exception:
+                front = None
+            backs = []
+            for path in paths[1:5]:
+                try:
+                    backs.append(pixbuf_at(path, 400))
+                except Exception:
+                    continue
+            return front, backs
+
+        def apply_textures(front, backs):
+            def to_texture(pixbuf):
+                if pixbuf is None:
+                    return None
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", DeprecationWarning)
                     return Gdk.Texture.new_for_pixbuf(pixbuf)
-            except Exception:
-                return None
+
+            pic.set_textures(to_texture(front),
+                             [to_texture(pixbuf) for pixbuf in backs])
+            return False
+
+        def load_textures():
+            GLib.idle_add(apply_textures, *build_textures())
 
         class PreviewDeck(Gtk.Widget):
             """The first image on top; the rest peek out as cards behind it."""
@@ -430,6 +550,11 @@ def main(argv: list[str]) -> int:
                 if orientation == Gtk.Orientation.VERTICAL:
                     return 120, 280, -1, -1
                 return 0, 0, -1, -1
+
+            def set_textures(self, front, backs):
+                self._front = front
+                self._backs = backs
+                self.queue_draw()
 
             def top_card(self):
                 """Rect of the front card, deck and peeking cards included."""
@@ -491,9 +616,8 @@ def main(argv: list[str]) -> int:
                 self._card(snapshot, self._front, (x, y, width, height),
                            radius, 1.0, False)
 
-        front_texture = texture_at(first_path, 900)
-        back_textures = [t for t in (texture_at(p, 400) for p in paths[1:5]) if t]
-        pic = PreviewDeck(front_texture, back_textures, first_size)
+        pic = PreviewDeck(None, [], first_size)
+        threading.Thread(target=load_textures, daemon=True).start()
 
         overlay = Gtk.Overlay()
         overlay.set_child(pic)
@@ -1118,15 +1242,34 @@ def main(argv: list[str]) -> int:
             row.set_subtitle(" · ".join(part for part in parts if part))
             return False
 
+        def header_size(path):
+            """Displayed pixel size from the header; no raster is decoded."""
+            with Image.open(path) as probe:
+                return oriented_size(probe)
+
+        def decode_hint(mode, params, source):
+            """How coarsely the estimate may decode, or None for the full raster."""
+            if mode == "dimensions":
+                target = (int(params["width"]), int(params["height"]))
+            elif mode == "percent":
+                scale = float(params["percent"]) / 100.0
+                target = (max(1, round(source[0] * scale)),
+                          max(1, round(source[1] * scale)))
+            else:
+                return None   # a byte target says nothing about pixels
+            return decode_bound(source, target)
+
         def run_estimate(token, mode, params):
             results = []
             skipped = 0
             error = None
             for path in paths:
                 try:
-                    image = load_image(path)
+                    source = header_size(path)
+                    image = cached_load_image(path,
+                                              decode_hint(mode, params, source))
                     results.append(estimate(image[0], image[1], image[2],
-                                            image[3], mode, params))
+                                            image[3], mode, params, source))
                 except Exception as exc:
                     skipped += 1
                     error = f"{type(exc).__name__}: {exc}"
@@ -1138,7 +1281,7 @@ def main(argv: list[str]) -> int:
             if state["pending"]:
                 GLib.source_remove(state["pending"])
                 state["pending"] = 0
-            if src_image is None:
+            if first_size is None:
                 show_status("—")
                 return
 

@@ -152,3 +152,52 @@ class PresetTests(unittest.TestCase):
             _x, _y, w, h = engine.crop_fit_rect((1200, 800), aspect)
             self.assertLessEqual(w, 1200, name)
             self.assertLessEqual(h, 800, name)
+
+
+class ExifOrientationTests(unittest.TestCase):
+    def _rotated_photo(self, tmp):
+        path = Path(tmp) / "rotated.jpg"
+        exif = Image.Exif()
+        exif[0x0112] = 6           # displayed rotated 90° clockwise
+        Image.new("RGB", (80, 40), color=(0, 90, 200)).save(
+            path, format="JPEG", exif=exif)
+        return path
+
+    def test_header_reports_the_displayed_size_without_decoding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._rotated_photo(tmp)
+            with Image.open(path) as probe:
+                self.assertEqual(engine.oriented_size(probe), (40, 80))
+
+    def test_load_transposes_and_drops_the_orientation_tag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._rotated_photo(tmp)
+            im, _fmt, exif, _icc = engine.load_image(str(path))
+            self.assertEqual(im.size, (40, 80))
+            saved = Image.Exif()
+            saved.load(exif)
+            self.assertNotIn(0x0112, saved)
+
+    def test_resize_uses_displayed_dimensions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._rotated_photo(tmp)
+            dst = Path(tmp) / "out.jpg"
+            result = engine.process_file(str(path), str(dst), "percent",
+                                         {"percent": 50})
+            self.assertTrue(result.ok, result.note)
+            with Image.open(dst) as out:
+                self.assertEqual(out.size, (20, 40))
+
+
+class EstimateOnReducedDecodeTests(unittest.TestCase):
+    def test_estimate_uses_the_source_size_not_the_decode_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = make_image(Path(tmp) / "photo.jpg", size=(1200, 800))
+            with Image.open(src) as probe:
+                source = engine.oriented_size(probe)
+            bound = engine.decode_bound(source, (480, 320))
+            im, fmt, exif, icc = engine.load_image(str(src), bound)
+            self.assertLess(im.width, source[0])    # decoded coarser than source
+            out = engine.estimate(im, fmt, exif, icc, "percent",
+                                  {"percent": 40}, source)
+            self.assertEqual(out["size"], (480, 320))
