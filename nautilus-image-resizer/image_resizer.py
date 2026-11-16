@@ -728,10 +728,34 @@ def main(argv: list[str]) -> int:
         chain.set_active(lock)
         chain.set_sensitive(first_size is not None)
         chain_icon = Gtk.Image.new_from_icon_name(
-            "chain-link-symbolic" if lock else "chain-broken-symbolic")
+            "changes-prevent-symbolic" if lock else "changes-allow-symbolic")
         chain_icon.set_pixel_size(16)
         chain.set_child(chain_icon)
         w_row.add_suffix(chain)
+
+        def row_spin_button(row):
+            if isinstance(row, Gtk.SpinButton):
+                return row
+            child = row.get_first_child()
+            while child is not None:
+                found = row_spin_button(child)
+                if found is not None:
+                    return found
+                child = child.get_next_sibling()
+            return None
+
+        # The value is a suffix too, and it makes the row's suffix box fill the
+        # row. Put the lock in front of it, with a spacer taking the slack, so
+        # the icon ends up immediately left of the value.
+        suffix_box = chain.get_parent()
+        spin_button = row_spin_button(w_row)
+        if suffix_box is not None and spin_button is not None:
+            spin_button.set_hexpand(False)
+            chain.unparent()
+            suffix_box.insert_child_after(chain, None)
+            spacer = Gtk.Box()
+            spacer.set_hexpand(True)
+            suffix_box.insert_child_after(spacer, None)
         syncing = {"active": False}
 
         def current_ratio():
@@ -757,8 +781,8 @@ def main(argv: list[str]) -> int:
 
         def set_chain_state(active: bool):
             chain_icon.set_from_icon_name(
-                "chain-link-symbolic" if active else "chain-broken-symbolic")
-            label = "Keep aspect ratio" if active else "Aspect ratio free"
+                "changes-prevent-symbolic" if active else "changes-allow-symbolic")
+            label = "Aspect ratio locked" if active else "Aspect ratio unlocked"
             chain.set_tooltip_text(label)
             chain.update_property([Gtk.AccessibleProperty.LABEL], [label])
 
