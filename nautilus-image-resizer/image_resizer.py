@@ -16,6 +16,7 @@ import sys
 import threading
 import warnings
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +33,10 @@ LOSSY = {"JPEG", "WEBP"}
 QUALITY_LADDER = (95, 85, 75, 65, 55, 45, 35, 25, 15)
 SCALE_STEP = 0.85
 MIN_EDGE = 64
+_MAX_FANOUT = 8  # estimate decodes in flight, process-wide; bounds RAM
+# A superseded estimate run can still have tasks in flight while the next one
+# starts; one shared gate keeps the decode count at _MAX_FANOUT overall.
+_fanout_gate = threading.Semaphore(_MAX_FANOUT)
 
 SAVE_KW = {
     "JPEG": {"quality": 92, "optimize": True},
@@ -337,6 +342,72 @@ def estimate(im: Image.Image, fmt: str, exif, icc, mode: str, params: dict,
     scaled = im.resize(size, Image.Resampling.LANCZOS) if size != im.size else im
     data = _encode(scaled, fmt, exif, icc, None)
     return {"size": size, "bytes": len(data), "note": None}
+
+
+def header_size(path: str) -> tuple[int, int]:
+    """Displayed pixel size from the header; no raster is decoded."""
+    with Image.open(path) as probe:
+        return oriented_size(probe)
+
+
+def decode_hint(mode: str, params: dict,
+                header: tuple[int, int]) -> tuple[int, int] | None:
+    """How coarsely the estimate may decode, or None for the full raster."""
+    if mode == "dimensions":
+        target = (int(params["width"]), int(params["height"]))
+    elif mode == "percent":
+        scale = float(params["percent"]) / 100.0
+        target = (max(1, round(header[0] * scale)),
+                  max(1, round(header[1] * scale)))
+    else:
+        return None   # a byte target says nothing about pixels
+    return decode_bound(header, target)
+
+
+def estimate_files(paths: list[str], mode: str, params: dict,
+                   should_abort=None) -> tuple[list[dict], int, str | None]:
+    """Estimate every path in parallel, then reconcile in input order.
+
+    Returns (results, skipped, error): the per-image estimates in input order,
+    how many paths could not be read, and the last such failure message.
+    `should_abort` is polled before each task; an aborted task contributes
+    nothing (not even to `skipped`).
+    """
+    if not paths:
+        return [], 0, None
+
+    def estimate_path(path):
+        if should_abort is not None and should_abort():
+            return None
+        try:
+            # The gate, not the pool size, is what bounds concurrent decodes:
+            # a superseded run's tasks may still be in flight here.
+            with _fanout_gate:
+                header = header_size(path)
+                image = cached_load_image(path,
+                                          decode_hint(mode, params, header))
+                return ("ok", estimate(image[0], image[1], image[2], image[3],
+                                       mode, params, header))
+        except Exception as exc:
+            # One unreadable file must not kill the batch.
+            return ("fail", f"{type(exc).__name__}: {exc}")
+
+    with ThreadPoolExecutor(max_workers=min(len(paths), _MAX_FANOUT)) as ex:
+        outcomes = list(ex.map(estimate_path, paths))
+
+    results: list[dict] = []
+    skipped = 0
+    error = None
+    for outcome in outcomes:
+        if outcome is None:
+            continue
+        kind, payload = outcome
+        if kind == "ok":
+            results.append(payload)
+        else:
+            skipped += 1
+            error = payload
+    return results, skipped, error
 
 
 def process_file(src: str, dst: str, mode: str, params: dict) -> JobResult:
@@ -1264,37 +1335,10 @@ def main(argv: list[str]) -> int:
             row.set_subtitle(" · ".join(part for part in parts if part))
             return False
 
-        def header_size(path):
-            """Displayed pixel size from the header; no raster is decoded."""
-            with Image.open(path) as probe:
-                return oriented_size(probe)
-
-        def decode_hint(mode, params, header):
-            """How coarsely the estimate may decode, or None for the full raster."""
-            if mode == "dimensions":
-                target = (int(params["width"]), int(params["height"]))
-            elif mode == "percent":
-                scale = float(params["percent"]) / 100.0
-                target = (max(1, round(header[0] * scale)),
-                          max(1, round(header[1] * scale)))
-            else:
-                return None   # a byte target says nothing about pixels
-            return decode_bound(header, target)
-
         def run_estimate(token, mode, params):
-            results = []
-            skipped = 0
-            error = None
-            for path in paths:
-                try:
-                    header = header_size(path)
-                    image = cached_load_image(path,
-                                              decode_hint(mode, params, header))
-                    results.append(estimate(image[0], image[1], image[2],
-                                            image[3], mode, params, header))
-                except Exception as exc:
-                    skipped += 1
-                    error = f"{type(exc).__name__}: {exc}"
+            results, skipped, error = estimate_files(
+                paths, mode, params,
+                should_abort=lambda: token != state["token"])
             GLib.idle_add(apply_estimate, token, mode, results, skipped, error)
 
         def queue_estimate(*_a):

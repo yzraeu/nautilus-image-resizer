@@ -9,7 +9,8 @@ This is a Nautilus plugin plus a small GTK4 / libadwaita app. It is not a GNOME 
 - Adds a `Resize Image…` entry to the right-click menu for image files in Files.
 - Opens a window with a preview that grows with it and a live output estimate
   (pixels, percent, and KB / MB) for whichever mode is on screen; with several
-  files selected it estimates all of them and shows the total.
+  files selected it estimates them in parallel (up to 8 at a time) and shows
+  the total.
 - Select several images and the menu reads **Resize N Images…**; the preview
   stacks them, first image on top and the rest peeking out behind.
 - Resize modes: percent, exact dimensions (with a crop-aware aspect lock), and
@@ -138,8 +139,9 @@ make test
 ```
 
 That byte-compiles both Python files and runs the engine tests in `tests/`,
-covering sizing, crop geometry and aspect presets, EXIF handling and the
-estimate/write parity. The GUI is only imported when the app runs, so the tests
+covering sizing, crop geometry and aspect presets, EXIF handling, the
+estimate/write parity, and the parallel estimate fan-out (input order,
+per-file failures, abort). The GUI is only imported when the app runs, so the tests
 run headless with Pillow only.
 
 ## License

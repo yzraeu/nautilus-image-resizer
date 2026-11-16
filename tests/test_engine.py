@@ -201,3 +201,42 @@ class EstimateOnReducedDecodeTests(unittest.TestCase):
             out = engine.estimate(im, fmt, exif, icc, "percent",
                                   {"percent": 40}, source)
             self.assertEqual(out["size"], (480, 320))
+
+
+class EstimateFilesTests(unittest.TestCase):
+    def test_results_follow_input_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = [str(make_image(Path(tmp) / f"img{i}.jpg", size=size))
+                     for i, size in enumerate(((200, 100), (400, 100), (800, 100)))]
+            results, skipped, error = engine.estimate_files(
+                paths, "percent", {"percent": 50})
+            self.assertEqual([r["size"] for r in results],
+                             [(100, 50), (200, 50), (400, 50)])
+            self.assertEqual(skipped, 0)
+            self.assertIsNone(error)
+
+    def test_failures_are_skipped_and_last_error_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            good = str(make_image(Path(tmp) / "good.jpg", size=(200, 100)))
+            text = Path(tmp) / "text-file.jpg"
+            text.write_text("hello")
+            missing = str(Path(tmp) / "missing.jpg")
+            results, skipped, error = engine.estimate_files(
+                [good, str(text), missing], "percent", {"percent": 50})
+            self.assertEqual([r["size"] for r in results], [(100, 50)])
+            self.assertEqual(skipped, 2)
+            self.assertTrue(error.startswith("FileNotFoundError"), error)
+            # A single bad file still reports its own failure.
+            _results, text_skipped, text_error = engine.estimate_files(
+                [str(text)], "percent", {"percent": 50})
+            self.assertEqual(text_skipped, 1)
+            self.assertTrue(text_error.startswith("UnidentifiedImageError"),
+                            text_error)
+
+    def test_abort_short_circuits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(make_image(Path(tmp) / "img.jpg"))
+            self.assertEqual(
+                engine.estimate_files([path], "percent", {"percent": 50},
+                                      should_abort=lambda: True),
+                ([], 0, None))
