@@ -31,7 +31,7 @@ or as a copy. Formats: JPEG, PNG, WEBP, BMP, TIFF.
 %autosetup -n %{name}-%{version}
 
 %build
-# Nothing to compile: two Python scripts, a desktop file and metainfo.
+# Nothing to compile: three Python files, a desktop file and metainfo.
 
 %install
 %make_install PREFIX=%{_prefix}
@@ -45,6 +45,7 @@ make test
 %license LICENSE
 %doc README.md
 %{_datadir}/nautilus-image-resizer/image_resizer.py
+%{_datadir}/nautilus-image-resizer/resize_engine.py
 %{_datadir}/nautilus-python/extensions/image_resizer_extension.py
 %{_datadir}/applications/dev.izzy.image-resizer.desktop
 %{_datadir}/metainfo/dev.izzy.image-resizer.metainfo.xml

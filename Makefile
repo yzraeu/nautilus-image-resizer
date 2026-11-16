@@ -5,12 +5,14 @@ PREFIX ?= $(HOME)/.local
 DESTDIR ?=
 
 APP_SRC := nautilus-image-resizer/image_resizer.py
+ENGINE_SRC := nautilus-image-resizer/resize_engine.py
 PLUGIN_SRC := nautilus/image_resizer_extension.py
 DESKTOP_IN := data/dev.izzy.image-resizer.desktop.in
 METAINFO_SRC := data/dev.izzy.image-resizer.metainfo.xml
 ICONS_SRC := $(wildcard data/icons/hicolor/index.theme data/icons/hicolor/scalable/actions/*.svg)
 
 APP_DST := $(DESTDIR)$(PREFIX)/share/nautilus-image-resizer/image_resizer.py
+ENGINE_DST := $(DESTDIR)$(PREFIX)/share/nautilus-image-resizer/resize_engine.py
 PLUGIN_DST := $(DESTDIR)$(PREFIX)/share/nautilus-python/extensions/image_resizer_extension.py
 DESKTOP_DST := $(DESTDIR)$(PREFIX)/share/applications/dev.izzy.image-resizer.desktop
 METAINFO_DST := $(DESTDIR)$(PREFIX)/share/metainfo/dev.izzy.image-resizer.metainfo.xml
@@ -19,11 +21,12 @@ ICON_DST := $(DESTDIR)$(PREFIX)/share/nautilus-image-resizer/icons
 .PHONY: test install uninstall clean
 
 test:
-	python3 -m py_compile $(APP_SRC) $(PLUGIN_SRC)
+	python3 -m py_compile $(APP_SRC) $(ENGINE_SRC) $(PLUGIN_SRC)
 	python3 -m unittest discover -s tests -v
 
 install: test
 	install -Dm755 $(APP_SRC) $(APP_DST)
+	install -Dm644 $(ENGINE_SRC) $(ENGINE_DST)
 	install -Dm644 $(PLUGIN_SRC) $(PLUGIN_DST)
 	install -Dm644 $(METAINFO_SRC) $(METAINFO_DST)
 	for icon in $(ICONS_SRC); do install -Dm644 $$icon $(ICON_DST)/$${icon#data/icons/}; done
@@ -40,7 +43,7 @@ install: test
 	@echo "Installed. Restart Files with: nautilus -q"
 
 uninstall:
-	rm -f $(APP_DST) $(PLUGIN_DST) $(DESKTOP_DST) $(METAINFO_DST)
+	rm -f $(APP_DST) $(ENGINE_DST) $(PLUGIN_DST) $(DESKTOP_DST) $(METAINFO_DST)
 	for icon in $(ICONS_SRC); do rm -f $(ICON_DST)/$${icon#data/icons/}; done
 	@echo "Removed. Restart Files with: nautilus -q"
 

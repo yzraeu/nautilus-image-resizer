@@ -102,7 +102,8 @@ Current version: 1.0.0 — the same number the **About** dialog reports.
 ## Layout
 
 ```text
-nautilus-image-resizer/image_resizer.py   # GTK app + Pillow engine
+nautilus-image-resizer/image_resizer.py   # GTK app (dialog, preview, crop UI)
+nautilus-image-resizer/resize_engine.py   # Pillow engine: decode, crop, size, encode
 nautilus/image_resizer_extension.py       # Nautilus MenuProvider, launches the app
 data/dev.izzy.image-resizer.desktop.in    # desktop file template
 data/dev.izzy.image-resizer.metainfo.xml  # AppStream metadata
@@ -140,11 +141,13 @@ hosts a repo that dnf can use. See the COPR docs for `copr-cli create` and
 make test
 ```
 
-That byte-compiles both Python files and runs the engine tests in `tests/`,
+That byte-compiles all three Python files and runs the engine tests in `tests/`,
 covering sizing, crop geometry and aspect presets, EXIF handling, the
-estimate/write parity, and the parallel estimate fan-out (input order,
-per-file failures, abort). The GUI is only imported when the app runs, so the tests
-run headless with Pillow only.
+estimate/write parity (byte for byte, in every mode), the byte-target ladder,
+the job failure contract, and the parallel estimate fan-out (input order,
+per-file failures, abort). The engine (`resize_engine.py`) imports no GTK, so
+the tests run headless with Pillow only; `image_resizer.py` is the GUI and
+imports the engine.
 
 ## License
 

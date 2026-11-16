@@ -1,6 +1,7 @@
-"""Headless tests for the Pillow engine in image_resizer.py.
+"""Headless tests for the Pillow engine in resize_engine.py.
 
 No GUI is imported. Run with: python3 -m unittest discover -s tests -v
+(or directly: python3 tests/test_engine.py).
 """
 
 import sys
@@ -12,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "nautilus-image-
 
 from PIL import Image  # noqa: E402
 
-import image_resizer as engine  # noqa: E402
+import resize_engine as engine  # noqa: E402
 
 
 def make_image(path, size=(800, 600), fmt="JPEG"):
@@ -61,17 +62,13 @@ class ProcessFileTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertFalse(dst.exists())
 
-    def test_estimate_does_not_write(self):
+    def test_render_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             src = make_image(Path(tmp) / "photo.png", fmt="PNG")
             im, fmt, exif, icc = engine.load_image(str(src))
-            out = engine.estimate(im, fmt, exif, icc, "percent", {"percent": 50})
-            self.assertEqual(out["size"], (400, 300))
+            out = engine.render(im, fmt, exif, icc, "percent", {"percent": 50})
+            self.assertEqual(out.size, (400, 300))
             self.assertEqual(sorted(Path(tmp).iterdir()), [src])
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 class CropGeometryTests(unittest.TestCase):
     def test_crop_box_uses_fractions(self):
@@ -174,11 +171,14 @@ class CropProcessingTests(unittest.TestCase):
             dst = Path(tmp) / "out.jpg"
             crop = {"fx": 0.1, "fy": 0.1, "fw": 0.6, "fh": 0.6}
             params = {"percent": 40, "crop": crop}
+            predicted, skipped, error = engine.estimate_files(
+                [str(src)], "percent", params)
             result = engine.process_file(str(src), str(dst), "percent", params)
-            im, fmt, exif, icc = engine.load_image(str(src))
-            predicted = engine.estimate(im, fmt, exif, icc, "percent", params)
-            self.assertEqual(predicted["size"], (288, 192))
-            self.assertEqual(predicted["bytes"], result.out_bytes)
+            self.assertTrue(result.ok, result.note)
+            self.assertEqual((skipped, error), (0, None))
+            self.assertEqual(predicted[0]["size"], (288, 192))
+            self.assertEqual(predicted[0]["bytes"], result.out_bytes)
+            self.assertEqual(result.out_bytes, dst.stat().st_size)
 
 class PresetTests(unittest.TestCase):
     def test_presets_cover_the_expected_ratios(self):
@@ -245,9 +245,9 @@ class EstimateOnReducedDecodeTests(unittest.TestCase):
             bound = engine.decode_bound(source, (480, 320))
             im, fmt, exif, icc = engine.load_image(str(src), bound)
             self.assertLess(im.width, source[0])    # decoded coarser than source
-            out = engine.estimate(im, fmt, exif, icc, "percent",
-                                  {"percent": 40}, source)
-            self.assertEqual(out["size"], (480, 320))
+            out = engine.render(im, fmt, exif, icc, "percent",
+                                {"percent": 40}, source)
+            self.assertEqual(out.size, (480, 320))
 
 
 class EstimateFilesTests(unittest.TestCase):
@@ -287,3 +287,164 @@ class EstimateFilesTests(unittest.TestCase):
                 engine.estimate_files([path], "percent", {"percent": 50},
                                       should_abort=lambda: True),
                 ([], 0, None))
+
+class DecodeHintTests(unittest.TestCase):
+    """The hint decides which pixels both adapters see, so it is load-bearing."""
+
+    HEADER = (1200, 800)
+
+    def test_no_crop_asks_for_the_target_only(self):
+        self.assertEqual(engine.decode_hint("percent", {"percent": 40}, self.HEADER),
+                         (480, 320))
+
+    def test_crop_scales_the_request_back_up_to_source_pixels(self):
+        # Region is 60% of the image, so the decoded raster must be larger than
+        # the target by 1/0.6 or the crop would have to be upscaled.
+        params = {"percent": 40, "crop": {"fx": 0.1, "fy": 0.1, "fw": 0.6, "fh": 0.6}}
+        self.assertEqual(engine.decode_hint("percent", params, self.HEADER),
+                         (480, 320))
+
+    def test_full_percent_under_a_quarter_crop_needs_the_whole_raster(self):
+        params = {"percent": 100, "crop": {"fx": 0, "fy": 0, "fw": 0.25, "fh": 0.25}}
+        self.assertEqual(engine.decode_hint("percent", params, self.HEADER),
+                         self.HEADER)
+
+    def test_dimensions_never_ask_for_more_than_the_region(self):
+        params = {"width": 4000, "height": 4000, "lock": True}
+        self.assertEqual(engine.decode_hint("dimensions", params, self.HEADER),
+                         self.HEADER)
+
+    def test_filesize_gets_no_hint(self):
+        self.assertIsNone(engine.decode_hint("filesize", {"max_bytes": 50000},
+                                             self.HEADER))
+
+    def test_the_cropped_region_always_covers_the_target(self):
+        params = {"percent": 40, "crop": {"fx": 0.1, "fy": 0.1, "fw": 0.6, "fh": 0.6}}
+        bound = engine.decode_hint("percent", params, self.HEADER)
+        with tempfile.TemporaryDirectory() as tmp:
+            src = make_image(Path(tmp) / "photo.jpg", size=self.HEADER)
+            im, _fmt, _exif, _icc = engine.load_image(str(src), bound)
+            _x, _y, cw, ch = engine.crop_box(im.size, params["crop"])
+            self.assertGreaterEqual(cw, 288)
+            self.assertGreaterEqual(ch, 192)
+
+
+class ParityTests(unittest.TestCase):
+    """The subtitle's byte count is the written file's length, not a guess."""
+
+    SIZE = (3000, 2000)      # large enough that the decode hint actually bites
+
+    def _parity(self, mode, params):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = make_image(Path(tmp) / "photo.jpg", size=self.SIZE)
+            dst = Path(tmp) / "out.jpg"
+            predicted, skipped, error = engine.estimate_files([str(src)], mode, params)
+            result = engine.process_file(str(src), str(dst), mode, params)
+            self.assertTrue(result.ok, result.note)
+            self.assertEqual((skipped, error), (0, None))
+            self.assertEqual(predicted[0]["bytes"], result.out_bytes)
+            self.assertEqual(result.out_bytes, dst.stat().st_size)
+            with Image.open(dst) as out:
+                self.assertEqual(out.size, predicted[0]["size"])
+            return predicted[0]["size"]
+
+    def test_percent_parity_on_a_reduced_decode(self):
+        bound = engine.decode_bound(self.SIZE, engine.decode_hint(
+            "percent", {"percent": 40}, self.SIZE))
+        self.assertLess(bound[0], self.SIZE[0])      # the hint really is coarse
+        self.assertEqual(self._parity("percent", {"percent": 40}), (1200, 800))
+
+    def test_dimensions_parity_on_a_reduced_decode(self):
+        self.assertEqual(
+            self._parity("dimensions", {"width": 900, "height": 600, "lock": True}),
+            (900, 600))
+
+    def test_crop_plus_percent_parity(self):
+        params = {"percent": 40, "crop": {"fx": 0.1, "fy": 0.1, "fw": 0.6, "fh": 0.6}}
+        self.assertEqual(self._parity("percent", params), (720, 480))
+
+    def test_filesize_parity(self):
+        size = self._parity("filesize", {"max_bytes": 30000})
+        self.assertLessEqual(size[0], self.SIZE[0])
+        self.assertLessEqual(size[1], self.SIZE[1])
+
+
+class FilesizeModeTests(unittest.TestCase):
+    def test_a_reachable_target_is_met(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = make_image(Path(tmp) / "photo.jpg", size=(1200, 800))
+            dst = Path(tmp) / "out.jpg"
+            result = engine.process_file(str(src), str(dst), "filesize",
+                                         {"max_bytes": 20000})
+            self.assertTrue(result.ok, result.note)
+            self.assertIsNone(result.note)
+            self.assertLessEqual(dst.stat().st_size, 20000)
+
+    def test_an_unreachable_target_still_writes_and_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = make_image(Path(tmp) / "photo.jpg", size=(1200, 800))
+            dst = Path(tmp) / "out.jpg"
+            result = engine.process_file(str(src), str(dst), "filesize",
+                                         {"max_bytes": 10})
+            self.assertTrue(result.ok)
+            self.assertIn("not reached", result.note or "")
+            self.assertGreater(dst.stat().st_size, 10)
+
+    def test_a_lossless_format_shrinks_to_the_floor_and_says_so(self):
+        # PNG has no quality ladder, so the only lever is resolution: the loop
+        # must stop at MIN_EDGE rather than spin.
+        with tempfile.TemporaryDirectory() as tmp:
+            src = make_image(Path(tmp) / "photo.png", size=(900, 600), fmt="PNG")
+            dst = Path(tmp) / "out.png"
+            result = engine.process_file(str(src), str(dst), "filesize",
+                                         {"max_bytes": 10})
+            self.assertTrue(result.ok)
+            self.assertIn("not reached", result.note or "")
+            with Image.open(dst) as out:
+                self.assertEqual(out.format, "PNG")
+                self.assertLessEqual(max(out.size), engine.MIN_EDGE)
+
+
+class JobContractTests(unittest.TestCase):
+    """process_file promises a JobResult for every input. Make it keep that."""
+
+    def test_an_oversized_raster_is_a_failed_result_not_a_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = make_image(Path(tmp) / "pano.jpg", size=(120, 80))
+            dst = Path(tmp) / "out.jpg"
+            saved = Image.MAX_IMAGE_PIXELS
+            Image.MAX_IMAGE_PIXELS = 100      # stands in for a >2x-limit photo
+            try:
+                result = engine.process_file(str(src), str(dst), "percent",
+                                             {"percent": 50})
+            finally:
+                Image.MAX_IMAGE_PIXELS = saved
+            self.assertFalse(result.ok)
+            self.assertIn("DecompressionBombError", result.note)
+            self.assertFalse(dst.exists())
+
+    def test_the_same_file_is_a_skipped_estimate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = make_image(Path(tmp) / "pano.jpg", size=(120, 80))
+            saved = Image.MAX_IMAGE_PIXELS
+            Image.MAX_IMAGE_PIXELS = 100
+            try:
+                results, skipped, error = engine.estimate_files(
+                    [str(src)], "percent", {"percent": 50})
+            finally:
+                Image.MAX_IMAGE_PIXELS = saved
+            self.assertEqual((results, skipped), ([], 1))
+            self.assertIn("DecompressionBombError", error)
+
+    def test_an_unwritable_destination_is_a_failed_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = make_image(Path(tmp) / "photo.jpg", size=(200, 100))
+            dst = Path(tmp) / "missing-dir" / "out.jpg"
+            result = engine.process_file(str(src), str(dst), "percent",
+                                         {"percent": 50})
+            self.assertFalse(result.ok)
+            self.assertIn("FileNotFoundError", result.note)
+
+
+if __name__ == "__main__":
+    unittest.main()
