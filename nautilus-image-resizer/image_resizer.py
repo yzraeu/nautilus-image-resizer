@@ -401,27 +401,18 @@ def main(argv: list[str]) -> int:
         print("Usage: image_resizer.py IMAGE [IMAGE ...]", file=sys.stderr)
         return 1
 
-    # First readable image drives thumbnail and the dimension prefill. Only the
-    # header is read: decoding a 6 MB photo here just to learn two numbers cost
-    # more than building the whole window.
-    first_size: tuple[int, int] | None = None
-    first_bytes = 0
-    first_path = paths[0]
-    for p in paths:
-        try:
-            with Image.open(p) as probe:
-                first_size = oriented_size(probe)
-            first_bytes = Path(p).stat().st_size
-            first_path = p
-            break
-        except Exception:
-            continue
-
     app = Adw.Application(application_id=APP_ID,
                           flags=Gio.ApplicationFlags.NON_UNIQUE)
 
     def on_activate(_app):
         n = len(paths)
+        # Everything image-derived arrives after the window is on screen: the
+        # first readable file's header, its byte size, the selection total and
+        # the preview stills. On a slow mount that is what used to hold the
+        # window back.
+        source = {"path": paths[0], "size": None, "bytes": 0, "total": 0,
+                  "probed": False}
+        edited = {"dims": False}
         win = Adw.ApplicationWindow(application=_app)
         win.set_title(APP_NAME)
         # The Percentage and File Size page icons ship with the app; register
@@ -506,19 +497,41 @@ def main(argv: list[str]) -> int:
                     GLib.Bytes.new(im.tobytes()), GdkPixbuf.Colorspace.RGB,
                     channels == 4, 8, im.width, im.height, im.width * channels)
 
-        def build_textures():
-            """Preview stills for every selected file; the window shows first."""
-            try:
-                front = pixbuf_at(first_path, 900)
-            except Exception:
-                front = None
+        def discover_source():
+            """Everything the window waits on, off the main thread."""
+            total = 0
+            for path in paths:
+                try:
+                    total += Path(path).stat().st_size
+                except OSError:
+                    continue
+            first_path, first_size, first_bytes = paths[0], None, 0
+            for path in paths:
+                try:
+                    with Image.open(path) as probe:
+                        first_size = oriented_size(probe)
+                except Exception:
+                    continue
+                first_path = path
+                try:
+                    first_bytes = Path(path).stat().st_size
+                except OSError:
+                    first_bytes = 0
+                break
+            front = None
+            if first_size is not None:
+                try:
+                    front = pixbuf_at(first_path, 900)
+                except Exception:
+                    front = None
             backs = []
             for path in paths[1:5]:
                 try:
                     backs.append(pixbuf_at(path, 400))
                 except Exception:
                     continue
-            return front, backs
+            return (first_path, first_size, first_bytes, total,
+                    front, backs)
 
         def apply_textures(front, backs):
             def to_texture(pixbuf):
@@ -531,9 +544,6 @@ def main(argv: list[str]) -> int:
             pic.set_textures(to_texture(front),
                              [to_texture(pixbuf) for pixbuf in backs])
             return False
-
-        def load_textures():
-            GLib.idle_add(apply_textures, *build_textures())
 
         class PreviewDeck(Gtk.Widget):
             """The first image on top; the rest peek out as cards behind it."""
@@ -554,6 +564,10 @@ def main(argv: list[str]) -> int:
             def set_textures(self, front, backs):
                 self._front = front
                 self._backs = backs
+                self.queue_draw()
+
+            def set_source_size(self, size):
+                self._source_size = size
                 self.queue_draw()
 
             def top_card(self):
@@ -616,8 +630,7 @@ def main(argv: list[str]) -> int:
                 self._card(snapshot, self._front, (x, y, width, height),
                            radius, 1.0, False)
 
-        pic = PreviewDeck(None, [], first_size)
-        threading.Thread(target=load_textures, daemon=True).start()
+        pic = PreviewDeck(None, [], source["size"])
 
         overlay = Gtk.Overlay()
         overlay.set_child(pic)
@@ -631,7 +644,7 @@ def main(argv: list[str]) -> int:
                       "portrait": False}
 
         def display_geometry():
-            if not first_size:
+            if not source["size"]:
                 return None
             return pic.image_geometry()
 
@@ -640,17 +653,17 @@ def main(argv: list[str]) -> int:
             if geometry is None:
                 return 0.0, 0.0
             scale, offset_x, offset_y = geometry
-            return (min(first_size[0], max(0.0, (x - offset_x) / scale)),
-                    min(first_size[1], max(0.0, (y - offset_y) / scale)))
+            return (min(source["size"][0], max(0.0, (x - offset_x) / scale)),
+                    min(source["size"][1], max(0.0, (y - offset_y) / scale)))
 
         def draw_crop(_area, cr, width, height):
             geometry = display_geometry()
-            if geometry is None or first_size is None:
+            if geometry is None or source["size"] is None:
                 return
             if crop_state["live"] is not None:
                 x, y, cw, ch = crop_state["live"]
             elif crop_state["crop"] is not None:
-                x, y, cw, ch = crop_box(first_size, crop_state["crop"])
+                x, y, cw, ch = crop_box(source["size"], crop_state["crop"])
             else:
                 return
             scale, offset_x, offset_y = geometry
@@ -669,26 +682,27 @@ def main(argv: list[str]) -> int:
         crop_area.set_draw_func(draw_crop)
 
         def current_aspect():
-            if first_size is None:
+            if source["size"] is None:
                 return None
             name = crop_state["preset"]
             if name == "free":
                 return None
-            base = ((first_size[0] / first_size[1]) if name == "original"
+            base = ((source["size"][0] / source["size"][1]) if name == "original"
                     else CROP_PRESETS[name])
             if base is None:
                 return None
             return (1.0 / base) if crop_state["portrait"] else base
 
         def commit_crop(rect):
-            previous = crop_state.get("dims") or first_size
+            previous = crop_state.get("dims") or source["size"]
             if rect is None:
                 crop_state["crop"] = None
-                crop_state["dims"] = first_size
+                crop_state["dims"] = source["size"]
             else:
                 x, y, cw, ch = rect
-                crop_state["crop"] = {"fx": x / first_size[0], "fy": y / first_size[1],
-                                      "fw": cw / first_size[0], "fh": ch / first_size[1]}
+                width, height = source["size"]
+                crop_state["crop"] = {"fx": x / width, "fy": y / height,
+                                      "fw": cw / width, "fh": ch / height}
                 crop_state["dims"] = (round(cw), round(ch))
             resize_fields(previous, crop_state["dims"])
             update_crop_label()
@@ -699,14 +713,14 @@ def main(argv: list[str]) -> int:
         def reapply_aspect():
             crop_state["aspect"] = current_aspect()
             update_crop_controls()
-            if not crop_state["on"] or not first_size or crop_state["aspect"] is None:
+            if not crop_state["on"] or not source["size"] or crop_state["aspect"] is None:
                 queue_estimate()
                 return
             if crop_state["crop"] is not None:
-                rect = crop_refit_rect(crop_box(first_size, crop_state["crop"]),
+                rect = crop_refit_rect(crop_box(source["size"], crop_state["crop"]),
                                        crop_state["aspect"])
             else:
-                rect = crop_fit_rect(first_size, crop_state["aspect"])
+                rect = crop_fit_rect(source["size"], crop_state["aspect"])
             commit_crop(rect)
 
         def on_crop_begin(_gesture, start_x, start_y):
@@ -719,7 +733,7 @@ def main(argv: list[str]) -> int:
                 return
             x0, y0 = to_source(origin[0], origin[1])
             x1, y1 = to_source(origin[0] + offset_x, origin[1] + offset_y)
-            crop_state["live"] = crop_drag_rect(x0, y0, x1, y1, first_size,
+            crop_state["live"] = crop_drag_rect(x0, y0, x1, y1, source["size"],
                                                 crop_state["aspect"])
             crop_area.queue_draw()
 
@@ -739,30 +753,28 @@ def main(argv: list[str]) -> int:
         drag.connect("drag-end", on_crop_end)
         crop_area.add_controller(drag)
 
-        total_bytes = 0
-        for p in paths:
-            try:
-                total_bytes += Path(p).stat().st_size
-            except OSError:
-                continue
-
-        if n > 1:
-            details = [_human_size(total_bytes), f"{n} images selected"]
-        else:
-            details = []
-            details.append(f"{first_size[0]}×{first_size[1]}" if first_size
-                           else "unreadable")
-            if first_bytes:
-                details.append(_human_size(first_bytes))
+        def update_caption():
+            size = source["size"]
+            if n > 1:
+                details = [_human_size(source["total"])] if source["probed"] else []
+                details.append(f"{n} images selected")
+            else:
+                if size is None:
+                    details = ["reading…" if not source["probed"] else "unreadable"]
+                else:
+                    details = [f"{size[0]}×{size[1]}"]
+                if source["bytes"]:
+                    details.append(_human_size(source["bytes"]))
+            name_label.set_text(Path(source["path"]).name)
+            detail_label.set_text(" · ".join(details))
 
         caption = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        name = Gtk.Label(label=Path(first_path).name, wrap=True,
-                         justify=Gtk.Justification.CENTER)
-        detail = Gtk.Label(label=" · ".join(details), wrap=True,
-                           justify=Gtk.Justification.CENTER)
-        detail.add_css_class("dim-label")
-        caption.append(name)
-        caption.append(detail)
+        name_label = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
+        detail_label = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
+        detail_label.add_css_class("dim-label")
+        caption.append(name_label)
+        caption.append(detail_label)
+        update_caption()
         preview.append(caption)
 
         crop_label = Gtk.Label(label="", wrap=True, xalign=0.0)
@@ -776,7 +788,7 @@ def main(argv: list[str]) -> int:
                 crop_label.set_visible(crop_state["on"])
                 crop_label.set_text("Drag on the preview to select the crop region")
                 return
-            x, y, cw, ch = crop_box(first_size, crop)
+            x, y, cw, ch = crop_box(source["size"], crop)
             crop_label.set_visible(True)
             crop_label.set_text(f"Crop {cw} × {ch} px at {x}, {y}")
 
@@ -789,8 +801,8 @@ def main(argv: list[str]) -> int:
             if active:
                 crop_area.set_cursor(Gdk.Cursor.new_from_name("crosshair"))
                 crop_state["aspect"] = current_aspect()
-                if crop_state["aspect"] is not None and first_size:
-                    commit_crop(crop_fit_rect(first_size, crop_state["aspect"]))
+                if crop_state["aspect"] is not None and source["size"]:
+                    commit_crop(crop_fit_rect(source["size"], crop_state["aspect"]))
                 else:
                     commit_crop(crop_state["crop"])
             else:
@@ -837,8 +849,8 @@ def main(argv: list[str]) -> int:
         # Dimensions
         page_dim = new_page()
         grp_dim = Adw.PreferencesGroup()
-        w0, h0 = first_size if first_size else (1920, 1080)
-        lock = first_size is not None
+        w0, h0 = 1920, 1080      # replaced by the real size once the header lands
+        lock = True
 
         w_adj = Gtk.Adjustment(value=w0, lower=1, upper=30000, step_increment=1)
         h_adj = Gtk.Adjustment(value=h0, lower=1, upper=30000, step_increment=1)
@@ -850,7 +862,7 @@ def main(argv: list[str]) -> int:
         chain = Gtk.ToggleButton()
         chain.set_valign(Gtk.Align.CENTER)
         chain.set_active(lock)
-        chain.set_sensitive(first_size is not None)
+        chain.set_sensitive(False)
         chain_icon = Gtk.Image.new_from_icon_name(
             "changes-prevent-symbolic" if lock else "changes-allow-symbolic")
         chain_icon.set_pixel_size(16)
@@ -884,12 +896,12 @@ def main(argv: list[str]) -> int:
 
         def current_ratio():
             """Aspect of the region the resize applies to (crop aware)."""
-            if first_size is None:
+            if source["size"] is None:
                 return None
             if crop_state["crop"]:
-                _x, _y, cw, ch = crop_box(first_size, crop_state["crop"])
+                _x, _y, cw, ch = crop_box(source["size"], crop_state["crop"])
             else:
-                cw, ch = first_size
+                cw, ch = source["size"]
             return cw / ch
 
         def resize_fields(old_dims, new_dims):
@@ -918,16 +930,22 @@ def main(argv: list[str]) -> int:
         chain.connect("toggled", on_chain_toggled)
 
         def on_w_changed(row, _pspec):
+            if syncing["active"]:
+                return
+            edited["dims"] = True      # the user owns the fields now
             ratio = current_ratio()
-            if not chain.get_active() or ratio is None or syncing["active"]:
+            if not chain.get_active() or ratio is None:
                 return
             syncing["active"] = True
             h_adj.set_value(min(30000, max(1, round(row.get_value() / ratio))))
             syncing["active"] = False
 
         def on_h_changed(row, _pspec):
+            if syncing["active"]:
+                return
+            edited["dims"] = True      # the user owns the fields now
             ratio = current_ratio()
-            if not chain.get_active() or ratio is None or syncing["active"]:
+            if not chain.get_active() or ratio is None:
                 return
             syncing["active"] = True
             w_adj.set_value(min(30000, max(1, round(row.get_value() * ratio))))
@@ -967,7 +985,7 @@ def main(argv: list[str]) -> int:
         crop_group = Adw.PreferencesGroup()
         crop_expander = Adw.ExpanderRow(title="Crop", subtitle="Off")
         crop_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
-        crop_switch.set_sensitive(first_size is not None)
+        crop_switch.set_sensitive(False)
         crop_expander.add_suffix(crop_switch)
         crop_group.add(crop_expander)
 
@@ -976,7 +994,7 @@ def main(argv: list[str]) -> int:
                 return "Off"
             if crop_state["crop"] is None:
                 return "Drag on the preview to pick a region"
-            x, y, cw, ch = crop_box(first_size, crop_state["crop"])
+            x, y, cw, ch = crop_box(source["size"], crop_state["crop"])
             return f"{cw} × {ch} px at {x}, {y}"
 
         def update_crop_controls():
@@ -1040,7 +1058,8 @@ def main(argv: list[str]) -> int:
         preset_body.append(preset_flow)
         preset_row.set_child(preset_body)
         preset_buttons = {}
-        original_aspect = ((first_size[0] / first_size[1]) if first_size else 4 / 3)
+        original_aspect = 4 / 3          # redrawn once the real size is known
+        original_glyph = None
         for name, aspect in CROP_PRESETS.items():
             label = {"free": "Free", "original": "Original"}.get(name, name)
             if name == "original":
@@ -1055,6 +1074,8 @@ def main(argv: list[str]) -> int:
             glyph.set_size_request(26, 18)
             glyph.set_halign(Gtk.Align.CENTER)
             glyph.set_draw_func(ratio_icon(aspect, dashed))
+            if name == "original":
+                original_glyph = glyph
             text = Gtk.Label(label=label)
             text.add_css_class("caption")
             content.append(glyph)
@@ -1138,8 +1159,9 @@ def main(argv: list[str]) -> int:
         win.set_content(toolbar)
 
         def update_sensitive(*_a):
-            resize.set_sensitive(switch.get_active()
-                                 or bool(suffix_row.get_text().strip()))
+            ready = source["probed"] and (switch.get_active()
+                                          or bool(suffix_row.get_text().strip()))
+            resize.set_sensitive(ready)
 
         def on_switch(*_a):
             suffix_row.set_visible(not switch.get_active())
@@ -1171,11 +1193,11 @@ def main(argv: list[str]) -> int:
             return line
 
         def pct_line(size):
-            if not first_size:
+            if not source["size"]:
                 return ""
-            base = first_size
+            base = source["size"]
             if crop_state["crop"]:
-                _x, _y, cw, ch = crop_box(first_size, crop_state["crop"])
+                _x, _y, cw, ch = crop_box(source["size"], crop_state["crop"])
                 base = (cw, ch)
             area = (size[0] * size[1]) / (base[0] * base[1])
             return f"{100.0 * math.sqrt(area):.0f} %"
@@ -1247,17 +1269,17 @@ def main(argv: list[str]) -> int:
             with Image.open(path) as probe:
                 return oriented_size(probe)
 
-        def decode_hint(mode, params, source):
+        def decode_hint(mode, params, header):
             """How coarsely the estimate may decode, or None for the full raster."""
             if mode == "dimensions":
                 target = (int(params["width"]), int(params["height"]))
             elif mode == "percent":
                 scale = float(params["percent"]) / 100.0
-                target = (max(1, round(source[0] * scale)),
-                          max(1, round(source[1] * scale)))
+                target = (max(1, round(header[0] * scale)),
+                          max(1, round(header[1] * scale)))
             else:
                 return None   # a byte target says nothing about pixels
-            return decode_bound(source, target)
+            return decode_bound(header, target)
 
         def run_estimate(token, mode, params):
             results = []
@@ -1265,11 +1287,11 @@ def main(argv: list[str]) -> int:
             error = None
             for path in paths:
                 try:
-                    source = header_size(path)
+                    header = header_size(path)
                     image = cached_load_image(path,
-                                              decode_hint(mode, params, source))
+                                              decode_hint(mode, params, header))
                     results.append(estimate(image[0], image[1], image[2],
-                                            image[3], mode, params, source))
+                                            image[3], mode, params, header))
                 except Exception as exc:
                     skipped += 1
                     error = f"{type(exc).__name__}: {exc}"
@@ -1281,7 +1303,7 @@ def main(argv: list[str]) -> int:
             if state["pending"]:
                 GLib.source_remove(state["pending"])
                 state["pending"] = 0
-            if first_size is None:
+            if source["size"] is None:
                 show_status("—")
                 return
 
@@ -1320,11 +1342,12 @@ def main(argv: list[str]) -> int:
             crop_state["portrait"] = False
             portrait.set_active(False)
             crop_state["aspect"] = None
-            crop_state["dims"] = first_size
+            crop_state["dims"] = source["size"]
             pct_adj.set_value(50)
+            dims = source["size"] or (w0, h0)
             syncing["active"] = True
-            w_adj.set_value(w0)
-            h_adj.set_value(h0)
+            w_adj.set_value(dims[0])
+            h_adj.set_value(dims[1])
             syncing["active"] = False
             chain.set_active(lock)
             size_adj.set_value(500)
@@ -1355,10 +1378,40 @@ def main(argv: list[str]) -> int:
             resize.set_label("Resizing…")
             threading.Thread(target=worker, args=(jobs,), daemon=True).start()
 
+        def apply_source(path, size, nbytes, total, front, backs):
+            """Fill in everything that needed a header or a decode."""
+            source.update(path=path, size=size, bytes=nbytes, total=total,
+                          probed=True)
+            if size is not None:
+                if not edited["dims"]:
+                    # Fill the prefill the user has not taken over yet; the
+                    # aspect lock would otherwise rewrite one of the two.
+                    syncing["active"] = True
+                    w_adj.set_value(size[0])
+                    h_adj.set_value(size[1])
+                    syncing["active"] = False
+                chain.set_sensitive(True)
+                crop_switch.set_sensitive(True)
+                crop_state["dims"] = size
+                pic.set_source_size(size)
+                original_glyph.set_draw_func(ratio_icon(size[0] / size[1], False))
+            else:
+                chain.set_active(False)   # toggled() flips the icon too
+            update_caption()
+            update_crop_controls()
+            apply_textures(front, backs)
+            update_sensitive()
+            queue_estimate()
+            return False
+
+        def load_source():
+            GLib.idle_add(apply_source, *discover_source())
+
         cancel.connect("clicked", lambda *_: win.close())
         reset.connect("clicked", on_reset)
         resize.connect("clicked", on_resize)
         queue_estimate()
+        threading.Thread(target=load_source, daemon=True).start()
         win.present()
 
     app.connect("activate", on_activate)
