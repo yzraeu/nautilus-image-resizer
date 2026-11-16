@@ -2,6 +2,8 @@
 
 Right-click an image in GNOME Files (Nautilus), choose **Resize Image**, and pick a size or crop. That is the whole app.
 
+![The Resize Image dialog: three images stacked in the preview, a 16:9 crop armed on the front one, and the live output estimate for the selection](docs/screenshot.png)
+
 This is a Nautilus plugin plus a small GTK4 / libadwaita app. It is not a GNOME Shell extension, and it is not distributed through extensions.gnome.org.
 
 ## What it does
