@@ -1,9 +1,11 @@
-"""Headless tests for the Pillow engine in resize_engine.py.
+"""Headless tests for the engine and the preview layout.
 
-No GUI is imported. Run with: python3 -m unittest discover -s tests -v
-(or directly: python3 tests/test_engine.py).
+No GUI is imported: `resize_engine` is Pillow only, and the preview geometry in
+`image_resizer` is pure module-level code. Run with:
+python3 -m unittest discover -s tests -v (or directly: python3 tests/test_engine.py).
 """
 
+import math
 import sys
 import tempfile
 import unittest
@@ -13,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "nautilus-image-
 
 from PIL import Image  # noqa: E402
 
+import image_resizer as preview  # noqa: E402
 import resize_engine as engine  # noqa: E402
 
 
@@ -444,6 +447,93 @@ class JobContractTests(unittest.TestCase):
                                          {"percent": 50})
             self.assertFalse(result.ok)
             self.assertIn("FileNotFoundError", result.note)
+
+
+class ScatterLayoutTests(unittest.TestCase):
+    """The pile must be deterministic, inside the spread, and aspect-true."""
+
+    def test_same_seed_gives_the_same_pile(self):
+        self.assertEqual(preview.scatter_layout(7, 5),
+                         preview.scatter_layout(7, 5))
+
+    def test_different_seeds_give_different_piles(self):
+        self.assertNotEqual(preview.scatter_layout(1, 5),
+                            preview.scatter_layout(2, 5))
+
+    def test_front_card_is_unrotated_and_centred(self):
+        # The crop overlay maps to its rect with an axis-aligned assumption.
+        for seed in range(20):
+            front = preview.scatter_layout(seed, 5)[0]
+            self.assertEqual(front.angle, 0.0)
+            self.assertEqual((front.dx, front.dy), (0.0, 0.0))
+
+    def test_backs_stay_inside_the_big_spread(self):
+        for seed in range(20):
+            cards = preview.scatter_layout(seed, 5)
+            self.assertEqual(len(cards), 5)
+            for card in cards[1:]:
+                self.assertLessEqual(abs(card.angle), preview.CARD_ANGLE)
+                self.assertLessEqual(abs(card.dx), preview.CARD_DX)
+                self.assertLessEqual(abs(card.dy), preview.CARD_DY)
+                self.assertGreaterEqual(card.width, preview.CARD_WIDTH[0])
+                self.assertLessEqual(card.width, preview.CARD_WIDTH[1])
+
+    def test_a_zero_spread_is_a_neat_pile(self):
+        for card in preview.scatter_layout(3, 4, spread=0)[1:]:
+            self.assertEqual((card.angle, card.dx, card.dy),
+                             (0.0, 0.0, 0.0))
+
+    def test_card_keeps_the_photo_aspect_inside_the_border(self):
+        card = preview.ScatterCard(width=300.0, angle=0.0, dx=0.0, dy=0.0)
+        for aspect in (4 / 3, 3 / 4, 16 / 9, 1.0):
+            width, height = preview.card_size(card, aspect)
+            photo_w = width - 2 * preview.CARD_BORDER
+            photo_h = height - 2 * preview.CARD_BORDER
+            self.assertAlmostEqual(photo_w / photo_h, aspect)
+
+    def test_the_front_card_is_drawn_above_its_base_size(self):
+        card = preview.ScatterCard(width=300.0, angle=0.0, dx=0.0, dy=0.0)
+        base = preview.card_size(card, 4 / 3)
+        front = preview.card_size(card, 4 / 3, preview.FRONT_SCALE)
+        self.assertAlmostEqual(front[0] / base[0], preview.FRONT_SCALE)
+        self.assertGreater(front[1], base[1])
+
+    def test_bounds_cover_every_rotated_card(self):
+        cards = preview.scatter_layout(11, 5)
+        aspects = [4 / 3, 3 / 4, 16 / 9, 1.0, 4 / 3]
+        x, y, width, height = preview.scatter_bounds(cards, aspects)
+        self.assertGreater(width, 0)
+        self.assertGreater(height, 0)
+        for index, card in enumerate(cards):
+            card_w, card_h = preview.card_size(
+                card, aspects[index],
+                preview.FRONT_SCALE if index == 0 else 1.0)
+            radians = math.radians(card.angle)
+            cos, sin = abs(math.cos(radians)), abs(math.sin(radians))
+            half_w = (card_w * cos + card_h * sin) / 2
+            half_h = (card_w * sin + card_h * cos) / 2
+            self.assertLessEqual(x, card.dx - half_w + 1e-9)
+            self.assertGreaterEqual(x + width, card.dx + half_w - 1e-9)
+            self.assertLessEqual(y, card.dy - half_h + 1e-9)
+            self.assertGreaterEqual(y + height, card.dy + half_h - 1e-9)
+
+
+class FallEasingTests(unittest.TestCase):
+    def test_starts_at_zero_and_lands_at_one(self):
+        self.assertEqual(preview.ease_out(0.0), 0.0)
+        self.assertEqual(preview.ease_out(1.0), 1.0)
+
+    def test_clamps_outside_the_progress_range(self):
+        self.assertEqual(preview.ease_out(-1.0), 0.0)
+        self.assertEqual(preview.ease_out(2.0), 1.0)
+
+    def test_is_monotonic_and_finishes_ahead_of_linear(self):
+        previous = 0.0
+        for step in range(1, 100):
+            value = preview.ease_out(step / 100)
+            self.assertGreaterEqual(value, previous)
+            previous = value
+        self.assertGreater(preview.ease_out(0.5), 0.5)
 
 
 if __name__ == "__main__":

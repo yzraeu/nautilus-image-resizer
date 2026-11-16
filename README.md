@@ -2,7 +2,7 @@
 
 Right-click an image in GNOME Files (Nautilus), choose **Resize Image**, and pick a size or crop. That is the whole app.
 
-![The Resize Image dialog: three images stacked in the preview, a 16:9 crop armed on the front one, and the live output estimate for the selection](docs/screenshot.png)
+![The Resize Image dialog: the preview with a 16:9 crop armed on the front photo, and the live output estimate for the selection](docs/screenshot.png)
 
 This is a Nautilus plugin plus a small GTK4 / libadwaita app. It is not a GNOME Shell extension, and it is not distributed through extensions.gnome.org.
 
@@ -14,7 +14,11 @@ This is a Nautilus plugin plus a small GTK4 / libadwaita app. It is not a GNOME 
   files selected it estimates them in parallel (up to 8 at a time) and shows
   the total.
 - Select several images and the menu reads **Resize N Images…**; the preview
-  stacks them, first image on top and the rest peeking out behind.
+  throws the first five onto the table as a scattered pile, each photo with a
+  white print border. The front card is the active image; click a back card to
+  bring it to the front and the caption, crop and output estimate follow it.
+  The pile is rolled from a fresh seed every time the window opens, and the
+  photos fall into it once on open.
 - Resize modes: percent, exact dimensions (with a crop-aware aspect lock), and
   target file size, which drops quality and then resolution until the file fits.
 - Crop: a collapsed **Crop** section you arm with its switch, then drag on the
@@ -147,9 +151,10 @@ That byte-compiles all three Python files and runs the engine tests in `tests/`,
 covering sizing, crop geometry and aspect presets, EXIF handling, the
 estimate/write parity (byte for byte, in every mode), the byte-target ladder,
 the job failure contract, and the parallel estimate fan-out (input order,
-per-file failures, abort). The engine (`resize_engine.py`) imports no GTK, so
-the tests run headless with Pillow only; `image_resizer.py` is the GUI and
-imports the engine.
+per-file failures, abort). It also tests the preview pile: the scatter layout is
+a pure function of seed, card count and spread, and the entrance easing.
+Neither `resize_engine.py` nor that geometry imports GTK, so the tests run
+headless with Pillow only; `image_resizer.py` is the GUI and imports the engine.
 
 ## License
 

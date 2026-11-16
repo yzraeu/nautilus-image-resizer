@@ -12,9 +12,12 @@ Importing this module has no side effects beyond defining the dialog.
 from __future__ import annotations
 
 import math
+import random
 import sys
 import threading
+import time
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -31,7 +34,7 @@ from resize_engine import (
     crop_resize_rect,
     estimate_files,
     exif_orientation,
-    oriented_size,
+    header_size,
     process_file,
 )
 
@@ -52,6 +55,122 @@ def _human_size(n: int) -> str:
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024.0
     return f"{n:.1f} GB"
+
+
+# --------------------------------------------------------------------------- #
+# Scatter layout
+# --------------------------------------------------------------------------- #
+
+# The approved "big spread", in layout pixels. `spread` scales the scatter as a
+# whole: SPREAD is the approved look, 0 is a neat pile.
+SPREAD = 100.0
+CARD_WIDTH = (270.0, 320.0)
+CARD_ANGLE = 9.0
+CARD_DX = 95.0
+CARD_DY = 55.0
+CARD_BORDER = 8.0
+CARD_RADIUS = 4.0
+PHOTO_RADIUS = 3.0
+FRONT_SCALE = 1.03
+
+# Entrance: each card falls onto the table once, from above.
+FALL_DISTANCE = 170.0
+FALL_ANGLE = 6.0
+FALL_SCALE = 0.05
+FALL_DURATION = 520.0
+FALL_DELAY = 90.0
+FALL_STEP = 70.0
+
+
+@dataclass(frozen=True)
+class ScatterCard:
+    """One card slot in the pile, in layout pixels."""
+
+    width: float
+    angle: float
+    dx: float
+    dy: float
+
+
+def scatter_layout(seed: int, count: int,
+                   spread: float = SPREAD) -> tuple[ScatterCard, ...]:
+    """The pile: same seed and count in, same cards out, every time.
+
+    Card 0 is the front. It never rotates or moves: the crop overlay maps to
+    its rect through `image_geometry()`, which assumes an axis-aligned
+    rectangle. Backs take the full spread so the pile reads as thrown down.
+    """
+    ratio = spread / SPREAD
+    rng = random.Random(seed)
+    cards = []
+    for index in range(count):
+        # Always roll every value, so the front card's fixed transform does
+        # not shift the rest of the pile between seeds.
+        width = rng.uniform(*CARD_WIDTH)
+        angle = rng.uniform(-CARD_ANGLE, CARD_ANGLE) * ratio
+        dx = rng.uniform(-CARD_DX, CARD_DX) * ratio
+        dy = rng.uniform(-CARD_DY, CARD_DY) * ratio
+        if index == 0:
+            angle, dx, dy = 0.0, 0.0, 0.0
+        cards.append(ScatterCard(width, angle, dx, dy))
+    return tuple(cards)
+
+
+def card_size(card: ScatterCard, aspect: float,
+              scale: float = 1.0) -> tuple[float, float]:
+    """Outer card size for a photo of `aspect`, white border included."""
+    width = card.width * scale
+    border = CARD_BORDER * scale
+    photo_width = max(1.0, width - 2 * border)
+    return width, photo_width / aspect + 2 * border
+
+
+def scatter_bounds(cards: tuple[ScatterCard, ...], aspects: list[float],
+                   margin: float = 0.0) -> tuple[float, float, float, float]:
+    """Union of the rotated cards, as (x, y, width, height).
+
+    Cards stick out past the old neat-stack box, so the deck measures this
+    instead of card + border * backs.
+    """
+    if not cards:
+        return (0.0, 0.0, 0.0, 0.0)
+    left = top = math.inf
+    right = bottom = -math.inf
+    for index, card in enumerate(cards):
+        width, height = card_size(card, aspects[index],
+                                  FRONT_SCALE if index == 0 else 1.0)
+        radians = math.radians(card.angle)
+        cos, sin = abs(math.cos(radians)), abs(math.sin(radians))
+        span_w = width * cos + height * sin
+        span_h = width * sin + height * cos
+        left = min(left, card.dx - span_w / 2)
+        right = max(right, card.dx + span_w / 2)
+        top = min(top, card.dy - span_h / 2)
+        bottom = max(bottom, card.dy + span_h / 2)
+    return (left - margin, top - margin,
+            right - left + 2 * margin, bottom - top + 2 * margin)
+
+
+def ease_out(t: float) -> float:
+    """`cubic-bezier(.2, .8, .25, 1)`: quick start, no overshoot."""
+    t = min(1.0, max(0.0, t))
+    if t <= 0.0:
+        return 0.0
+    if t >= 1.0:
+        return 1.0
+
+    def axis(s: float, p1: float, p2: float) -> float:
+        u = 1.0 - s
+        return 3.0 * u * u * s * p1 + 3.0 * u * s * s * p2 + s * s * s
+
+    low, high = 0.0, 1.0
+    for _ in range(24):
+        mid = (low + high) / 2
+        if axis(mid, 0.2, 0.25) < t:
+            low = mid
+        else:
+            high = mid
+    return axis((low + high) / 2, 0.8, 1.0)
 
 
 def main(argv: list[str]) -> int:
@@ -174,24 +293,30 @@ def main(argv: list[str]) -> int:
         def discover_source():
             """Everything the window waits on, off the main thread."""
             total = 0
+            sizes = {}
             for path in paths:
                 try:
-                    total += Path(path).stat().st_size
+                    nbytes = Path(path).stat().st_size
                 except OSError:
-                    continue
-            first_path, first_size, first_bytes = paths[0], None, 0
-            for path in paths:
+                    nbytes = 0
+                total += nbytes
+                sizes[path] = nbytes
+            # Headers are cheap, but only the cards that can be shown need one.
+            infos = {}
+            for path in paths[:5]:
                 try:
-                    with Image.open(path) as probe:
-                        first_size = oriented_size(probe)
+                    size = header_size(path)
                 except Exception:
-                    continue
-                first_path = path
-                try:
-                    first_bytes = Path(path).stat().st_size
-                except OSError:
-                    first_bytes = 0
-                break
+                    size = None
+                infos[path] = (size, sizes[path])
+            # The front is the first readable file, as before. Its header is
+            # all the caption and the crop need; the pixels come next.
+            first_path = paths[0]
+            for path in infos:
+                if infos[path][0] is not None:
+                    first_path = path
+                    break
+            first_size, first_bytes = infos[first_path]
             front = None
             if first_size is not None:
                 try:
@@ -200,116 +325,290 @@ def main(argv: list[str]) -> int:
                     front = None
             backs = []
             for path in paths[1:5]:
+                if path == first_path:
+                    continue
                 try:
-                    backs.append(pixbuf_at(path, 400))
+                    backs.append((path, pixbuf_at(path, 400)))
                 except Exception:
                     continue
-            return (first_path, first_size, first_bytes, total,
-                    front, backs)
+            return {"path": first_path, "size": first_size,
+                    "bytes": first_bytes, "total": total, "front": front,
+                    "backs": backs, "infos": infos}
+
+        def to_texture(pixbuf):
+            if pixbuf is None:
+                return None
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                return Gdk.Texture.new_for_pixbuf(pixbuf)
 
         def apply_textures(front, backs):
-            def to_texture(pixbuf):
-                if pixbuf is None:
-                    return None
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", DeprecationWarning)
-                    return Gdk.Texture.new_for_pixbuf(pixbuf)
-
-            pic.set_textures(to_texture(front),
-                             [to_texture(pixbuf) for pixbuf in backs])
-            return False
+            pic.set_images(
+                [(source["path"], to_texture(front))]
+                + [(path, to_texture(pixbuf)) for path, pixbuf in backs])
 
         class PreviewDeck(Gtk.Widget):
-            """The first image on top; the rest peek out as cards behind it."""
+            """The selected photos as a scattered pile; the front card is active.
 
-            PAD = 10  # px each back card is offset from the one in front of it
+            The pile is `scatter_layout(seed, count)`: deterministic per seed,
+            different on every window open. Back cards can be promoted to the
+            front. The front card never rotates, because the crop overlay maps
+            onto it with `image_geometry()`, which assumes an axis-aligned
+            rectangle.
+            """
 
-            def __init__(self, front, backs, source_size, label):
+            def __init__(self, label):
                 super().__init__()
-                self._front = front
-                self._backs = backs        # nearest card first
-                self._source_size = source_size
+                self._entries = []      # [(path, texture)], front first
+                self._source_size = None
+                self._seed = time.time_ns()
+                self._falling = False
+                self._fell = False
+                self._fall_started = None
+                self._fall_elapsed = 0.0
                 self.set_accessible_role(Gtk.AccessibleRole.IMG)
                 self.update_property([Gtk.AccessibleProperty.LABEL], [label])
 
             def set_label(self, label):
                 self.update_property([Gtk.AccessibleProperty.LABEL], [label])
 
-            def do_measure(self, orientation, _for_size):
-                if orientation == Gtk.Orientation.VERTICAL:
-                    return 120, 280, -1, -1
-                return 0, 0, -1, -1
+            def front_path(self):
+                return self._entries[0][0] if self._entries else None
 
-            def set_textures(self, front, backs):
-                self._front = front
-                self._backs = backs
+            def set_images(self, entries):
+                self._entries = list(entries)
+                self.queue_resize()
                 self.queue_draw()
+                self._start_fall()
+
+            def set_front_texture(self, texture):
+                if self._entries:
+                    self._entries[0] = (self._entries[0][0], texture)
+                    self.queue_resize()
+                    self.queue_draw()
 
             def set_source_size(self, size):
                 self._source_size = size
+                self.queue_resize()
                 self.queue_draw()
 
-            def top_card(self):
-                """Rect of the front card, deck and peeking cards included."""
+            # -- geometry --------------------------------------------------- #
+
+            def _aspects(self):
+                aspects = []
+                for index, (_path, texture) in enumerate(self._entries):
+                    if index == 0 and self._source_size:
+                        width, height = self._source_size
+                    elif texture is not None:
+                        width, height = texture.get_width(), texture.get_height()
+                    else:
+                        width, height = 4.0, 3.0
+                    aspects.append(width / height)
+                return aspects
+
+            def _geometry(self):
+                """Placed cards and the fit scale, in widget coordinates.
+
+                Each placed card is (cx, cy, width, height, angle, scale):
+                width and height are the card's own size, `scale` maps them
+                into the widget. The pile is centred; cards that stick out
+                past the old neat-stack box are fitted in, never clipped.
+                """
                 width, height = self.get_width(), self.get_height()
-                inset = self.PAD * len(self._backs)
-                avail_w, avail_h = max(1, width - inset), max(1, height - inset)
-                if self._source_size:
-                    source_w, source_h = self._source_size
-                    scale = min(avail_w / source_w, avail_h / source_h)
-                    card_w, card_h = source_w * scale, source_h * scale
-                else:
-                    card_w, card_h = avail_w, avail_h
-                # The stack takes card + inset; center that block in the widget.
-                return ((width - card_w - inset) / 2,
-                        (height - card_h - inset) / 2,
-                        card_w, card_h)
+                if not self._entries or width <= 0 or height <= 0:
+                    return (), 1.0
+                aspects = self._aspects()
+                cards = scatter_layout(self._seed, len(self._entries))
+                bounds = scatter_bounds(cards, aspects, margin=2.0)
+                fit = min(1.0, width / bounds[2], height / bounds[3])
+                origin_x = width / 2 - (bounds[0] + bounds[2] / 2) * fit
+                origin_y = height / 2 - (bounds[1] + bounds[3] / 2) * fit
+                placed = []
+                for index, card in enumerate(cards):
+                    card_w, card_h = card_size(card, aspects[index])
+                    scale = fit * (FRONT_SCALE if index == 0 else 1.0)
+                    placed.append((origin_x + card.dx * fit,
+                                   origin_y + card.dy * fit,
+                                   card_w, card_h, card.angle, scale))
+                return placed, fit
+
+            def do_measure(self, orientation, _for_size):
+                if not self._entries:
+                    if orientation == Gtk.Orientation.VERTICAL:
+                        return 120, 280, -1, -1
+                    return 0, 0, -1, -1
+                aspects = self._aspects()
+                bounds = scatter_bounds(
+                    scatter_layout(self._seed, len(self._entries)), aspects,
+                    margin=2.0)
+                if orientation == Gtk.Orientation.VERTICAL:
+                    return 120, math.ceil(bounds[3]), -1, -1
+                return 0, math.ceil(bounds[2]), -1, -1
+
+            def top_card(self):
+                """Rect of the front card, scale 1.03 and border included."""
+                placed = self._geometry()[0]
+                if not placed:
+                    return (0.0, 0.0, 0.0, 0.0)
+                cx, cy, width, height, _angle, scale = placed[0]
+                width, height = width * scale, height * scale
+                return (cx - width / 2, cy - height / 2, width, height)
 
             def image_geometry(self):
-                """Scale and offset mapping the source image onto the widget."""
+                """Scale and offset mapping the source image onto its photo."""
                 if self._source_size is None:
                     return None
-                x, y, width, height = self.top_card()
-                scale = width / self._source_size[0]
-                return (scale, x, y)
+                placed = self._geometry()[0]
+                if not placed:
+                    return None
+                x, y, width, _height = self.top_card()
+                border = CARD_BORDER * placed[0][5]
+                photo_w = width - 2 * border
+                if photo_w <= 0:
+                    return None
+                return (photo_w / self._source_size[0], x + border, y + border)
 
-            def _card(self, snapshot, texture, rect, radius, alpha, cover):
-                if texture is None:
+            def card_at(self, x, y):
+                """Index of the topmost card under the point, front first."""
+                placed = self._geometry()[0]
+                for index, card in enumerate(placed):
+                    cx, cy, width, height, angle, scale = card
+                    dx, dy = x - cx, y - cy
+                    radians = math.radians(-angle)
+                    cos, sin = math.cos(radians), math.sin(radians)
+                    lx = dx * cos - dy * sin
+                    ly = dx * sin + dy * cos
+                    if (abs(lx) <= width * scale / 2
+                            and abs(ly) <= height * scale / 2):
+                        return index
+                return -1
+
+            def promote(self, index):
+                """Swap a back card with the front; return the new front path."""
+                if not 0 < index < len(self._entries):
+                    return None
+                if self._entries[index][1] is None:
+                    return None
+                entries = list(self._entries)
+                entries[0], entries[index] = entries[index], entries[0]
+                self._entries = entries
+                self.queue_resize()
+                self.queue_draw()
+                return entries[0][0]
+
+            # -- entrance --------------------------------------------------- #
+
+            def _start_fall(self):
+                if self._fell:
                     return
-                x, y, width, height = rect
-                area = Graphene.Rect().init(x, y, width, height)
-                rounded = Gsk.RoundedRect()
-                rounded.init_from_rect(area, radius)
-                snapshot.push_rounded_clip(rounded)
+                if not any(texture is not None
+                           for _path, texture in self._entries):
+                    return
+                self._fell = True
+                self._falling = True
+                self._fall_started = None
+                self.add_tick_callback(self._tick)
+
+            def _tick(self, _widget, clock):
+                now = clock.get_frame_time() / 1000.0        # ms
+                if self._fall_started is None:
+                    self._fall_started = now
+                self._fall_elapsed = now - self._fall_started
+                total = (FALL_DELAY + FALL_STEP * max(0, len(self._entries) - 1)
+                         + FALL_DURATION)
+                if self._fall_elapsed >= total:
+                    self._falling = False
+                    self.queue_draw()
+                    return False
+                self.queue_draw()
+                return True
+
+            def _settle(self, draw_index):
+                """0 at the start of a card's fall, 1 when it has landed."""
+                if not self._falling:
+                    return 1.0
+                delay = FALL_DELAY + FALL_STEP * draw_index
+                return ease_out((self._fall_elapsed - delay) / FALL_DURATION)
+
+            # -- drawing ---------------------------------------------------- #
+
+            def _draw_card(self, snapshot, texture, cx, cy, width, height,
+                           angle, scale, alpha, front):
+                if texture is None or alpha <= 0.0:
+                    return
+                snapshot.save()
+                snapshot.transform(
+                    Gsk.Transform.new()
+                    .translate(Graphene.Point().init(cx, cy))
+                    .rotate(angle)
+                    .scale(scale, scale))
                 snapshot.push_opacity(alpha)
-                if cover:
-                    # Crop to fill the card instead of squashing the photo.
-                    texture_w, texture_h = texture.get_width(), texture.get_height()
-                    scale = max(width / texture_w, height / texture_h)
-                    draw_w, draw_h = texture_w * scale, texture_h * scale
-                    snapshot.append_texture(
-                        texture,
-                        Graphene.Rect().init(x + (width - draw_w) / 2,
-                                             y + (height - draw_h) / 2,
-                                             draw_w, draw_h))
-                else:
-                    snapshot.append_texture(texture, area)
-                snapshot.pop()
-                snapshot.pop()
+                shadow = Gsk.Shadow()
+                shadow.color = Gdk.RGBA(0, 0, 0, 0.28)
+                shadow.dx = 0.0
+                shadow.dy = 2.0
+                shadow.radius = 6.0
+                snapshot.push_shadow([shadow])
+                left, top = -width / 2, -height / 2
+                card = Graphene.Rect().init(left, top, width, height)
+                rounded = Gsk.RoundedRect()
+                rounded.init_from_rect(card, CARD_RADIUS)
+                snapshot.push_rounded_clip(rounded)
+                snapshot.append_color(Gdk.RGBA(1, 1, 1, 1), card)
+                photo_x, photo_y = left + CARD_BORDER, top + CARD_BORDER
+                photo_w = width - 2 * CARD_BORDER
+                photo_h = height - 2 * CARD_BORDER
+                photo = Graphene.Rect().init(photo_x, photo_y, photo_w, photo_h)
+                photo_rounded = Gsk.RoundedRect()
+                photo_rounded.init_from_rect(photo, PHOTO_RADIUS)
+                snapshot.push_rounded_clip(photo_rounded)
+                # Crop to fill the print instead of squashing the photo.
+                texture_w, texture_h = texture.get_width(), texture.get_height()
+                cover = max(photo_w / texture_w, photo_h / texture_h)
+                draw_w, draw_h = texture_w * cover, texture_h * cover
+                snapshot.append_texture(
+                    texture,
+                    Graphene.Rect().init(photo_x + (photo_w - draw_w) / 2,
+                                         photo_y + (photo_h - draw_h) / 2,
+                                         draw_w, draw_h))
+                snapshot.pop()          # photo clip
+                snapshot.pop()          # card clip
+                snapshot.pop()          # shadow
+                if front:
+                    # Accent ring just inside the white border.
+                    ring = Gsk.RoundedRect()
+                    ring.init_from_rect(
+                        Graphene.Rect().init(left + 1.0, top + 1.0,
+                                             width - 2.0, height - 2.0),
+                        CARD_RADIUS + 1.0)
+                    accent = (Adw.StyleManager.get_default()
+                              .get_accent_color_rgba())
+                    snapshot.append_border(ring, [2.0] * 4, [accent] * 4)
+                snapshot.pop()          # opacity
+                snapshot.restore()
 
             def do_snapshot(self, snapshot):
-                x, y, width, height = self.top_card()
-                radius = 8.0
-                for depth in range(len(self._backs), 0, -1):
-                    offset = self.PAD * depth
-                    alpha = 0.65 + 0.2 * (len(self._backs) - depth)
-                    self._card(snapshot, self._backs[depth - 1],
-                               (x + offset, y + offset, width, height),
-                               radius, alpha, True)
-                self._card(snapshot, self._front, (x, y, width, height),
-                           radius, 1.0, False)
+                placed, fit = self._geometry()
+                if not placed:
+                    return
+                snapshot.push_clip(
+                    Graphene.Rect().init(0, 0, self.get_width(),
+                                         self.get_height()))
+                count = len(placed)
+                for index in range(count - 1, -1, -1):
+                    cx, cy, width, height, angle, scale = placed[index]
+                    # Back to front: the backmost card starts first.
+                    settle = self._settle(count - 1 - index)
+                    drop = FALL_DISTANCE * fit * (1.0 - settle)
+                    self._draw_card(
+                        snapshot, self._entries[index][1],
+                        cx, cy - drop, width, height,
+                        angle + FALL_ANGLE * (1.0 - settle),
+                        scale * (1.0 + FALL_SCALE * (1.0 - settle)),
+                        settle, index == 0)
+                snapshot.pop()
 
-        pic = PreviewDeck(None, [], source["size"], _("Image preview"))
+        pic = PreviewDeck(_("Image preview"))
 
         overlay = Gtk.Overlay()
         overlay.set_child(pic)
@@ -1140,10 +1439,24 @@ def main(argv: list[str]) -> int:
             resize.set_label(_("Resizing…"))
             threading.Thread(target=worker, args=(jobs,), daemon=True).start()
 
-        def apply_source(path, size, nbytes, total, front, backs):
+        files = {}
+        fitted = {"done": False}
+
+        def preview_label(path):
+            if source["size"] is None:
+                return _("Image preview (unavailable)")
+            label = _("Image preview: {}").format(Path(path).name)
+            if n > 1:
+                label += _(", plus {} more images").format(n - 1)
+            return label
+
+        def apply_source(data):
             """Fill in everything that needed a header or a decode."""
-            source.update(path=path, size=size, bytes=nbytes, total=total,
+            source.update(path=data["path"], size=data["size"],
+                          bytes=data["bytes"], total=data["total"],
                           probed=True)
+            files.update(data["infos"])
+            size = data["size"]
             if size is not None:
                 if not edited["dims"]:
                     # Fill the prefill the user has not taken over yet; the
@@ -1160,21 +1473,87 @@ def main(argv: list[str]) -> int:
             else:
                 chain.set_active(False)   # toggled() flips the icon too
             update_caption()
-            if size is not None and front is not None:
-                preview_label = _("Image preview: {}").format(Path(path).name)
-                if n > 1:
-                    preview_label += _(", plus {} more images").format(n - 1)
+            if size is not None and data["front"] is not None:
+                pic.set_label(preview_label(data["path"]))
             else:
-                preview_label = _("Image preview (unavailable)")
-            pic.set_label(preview_label)
+                pic.set_label(_("Image preview (unavailable)"))
             update_crop_controls()
-            apply_textures(front, backs)
+            apply_textures(data["front"], data["backs"])
             update_sensitive()
             queue_estimate()
+            GLib.idle_add(fit_preview)
             return False
 
+        def show_front(path, size, nbytes):
+            """A tapped card is the front: caption, crop and estimate follow."""
+            source.update(path=path, size=size, bytes=nbytes)
+            if size is not None:
+                pic.set_source_size(size)
+                chain.set_sensitive(True)
+                crop_switch.set_sensitive(True)
+                if crop_state["crop"] is not None:
+                    x, y, width, height = crop_box(size, crop_state["crop"])
+                    commit_crop((round(x), round(y),
+                                 round(width), round(height)))
+                else:
+                    commit_crop(None)
+            else:
+                # A header that would not read cannot be cropped.
+                chain.set_sensitive(False)
+                crop_switch.set_sensitive(False)
+                if crop_state["on"]:
+                    set_crop_enabled(False)
+            update_caption()
+            pic.set_label(preview_label(path))
+            update_crop_controls()
+            queue_estimate()
+
+        def apply_front_texture(path, pixbuf):
+            if pic.front_path() == path:
+                pic.set_front_texture(to_texture(pixbuf))
+            return False
+
+        def upgrade_front(path):
+            """Re-decode a promoted card at the front's 900 px."""
+            try:
+                pixbuf = pixbuf_at(path, 900)
+            except Exception:
+                return
+            GLib.idle_add(apply_front_texture, path, pixbuf)
+
+        def on_deck_pressed(gesture, _n_press, x, y):
+            index = pic.card_at(x, y)
+            if index <= 0:
+                return
+            # Claim the press so a tap on a back card is not also a crop drag.
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+            path = pic.promote(index)
+            if path is None or path == source["path"]:
+                return
+            size, nbytes = files.get(path, (None, 0))
+            show_front(path, size, nbytes)
+            threading.Thread(target=upgrade_front, args=(path,),
+                             daemon=True).start()
+
+        def fit_preview():
+            """Give the pile the height its cards ask for, once per open."""
+            if fitted["done"]:
+                return False
+            height = paned.get_height()
+            if height <= 0:
+                return False
+            fitted["done"] = True
+            natural = preview.measure(Gtk.Orientation.VERTICAL, -1)[1]
+            paned.set_position(max(280, min(natural, int(height * 0.55))))
+            return False
+
+        deck_click = Gtk.GestureClick()
+        deck_click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        deck_click.connect("pressed", on_deck_pressed)
+        overlay.add_controller(deck_click)
+
         def load_source():
-            GLib.idle_add(apply_source, *discover_source())
+            GLib.idle_add(apply_source, discover_source())
 
         cancel.connect("clicked", lambda *_: win.close())
         reset.connect("clicked", on_reset)
