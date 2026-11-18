@@ -1,5 +1,5 @@
 Name:           nautilus-image-resizer
-Version:        1.0.0
+Version:        1.0.1
 Release:        1%{?dist}
 Summary:        Resize and crop images from the GNOME Files right-click menu
 
@@ -25,7 +25,7 @@ Requires:       python3-pillow
 Adds a Resize Image entry to the right-click menu in GNOME Files
 (Nautilus). Pick a size by percent, by dimensions, or by target file
 size, crop with aspect presets if needed, and save over the original
-or as a copy. Formats: JPEG, PNG, WEBP, BMP, TIFF.
+or as a copy. A live preview shows the result with an output size estimate before you save. Formats: JPEG, PNG, WEBP, BMP, TIFF.
 
 %prep
 %autosetup -n %{name}-%{version}
@@ -54,5 +54,10 @@ make test
 %{_datadir}/nautilus-image-resizer/icons/hicolor/scalable/actions/file-size-symbolic.svg
 
 %changelog
+* Tue Nov 17 2026 yzraeu <yzraeu@gmail.com> - 1.0.1-1
+- Multi-image stacks, scattered photo preview, faster startup and estimates
+- Keyboard and screen reader support, accessibility fixes
+- Store listing: screenshots, keywords, Graphics category
+
 * Sun Nov 15 2026 yzraeu <yzraeu@gmail.com> - 1.0.0-1
 - Initial package

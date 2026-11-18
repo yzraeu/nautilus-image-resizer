@@ -12,13 +12,40 @@
       crop with aspect presets if needed, and save over the original or
       as a copy.
     </p>
+    <p>
+      A live preview shows the result before you save, with an estimate
+      of the output file size. Your photos are laid out like prints
+      scattered on a table; tap any photo to bring it to the front.
+    </p>
   </description>
   <launchable type="desktop-id">dev.izzy.image-resizer.desktop</launchable>
   <url type="homepage">https://github.com/yzraeu/nautilus-image-resizer</url>
   <developer>
     <name>yzraeu</name>
   </developer>
+  <categories>
+    <category>Graphics</category>
+  </categories>
+  <keywords>
+    <keyword>image</keyword>
+    <keyword>resize</keyword>
+    <keyword>photo</keyword>
+    <keyword>crop</keyword>
+    <keyword>nautilus</keyword>
+    <keyword>files</keyword>
+  </keywords>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Resize and crop from the Files right-click menu</caption>
+      <image>https://raw.githubusercontent.com/yzraeu/nautilus-image-resizer/v1.0.1/docs/screenshot.png</image>
+    </screenshot>
+  </screenshots>
   <releases>
+    <release version="1.0.1" date="2026-11-17">
+      <description>
+        <p>Multi-image stacks, scattered photo preview, faster startup and output estimates, and keyboard and screen reader support.</p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-11-15">
       <description>
         <p>First release: percent, dimensions and target-size resizing with crop presets.</p>

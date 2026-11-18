@@ -40,7 +40,7 @@ from resize_engine import (
 
 APP_ID = "dev.izzy.image-resizer"
 APP_NAME = "Nautilus Image Resizer"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 APP_REPO = "https://github.com/yzraeu/nautilus-image-resizer"
 APP_AUTHOR = "yzraeu"
 
